@@ -1,15 +1,13 @@
 -- TigerFuryAlert (WoW 1.12 / Lua 5.0)
--- Version: 1.0.4
+-- Version: 1.0.5
 -- Plays a sound when Tiger's Fury is about to expire.
--- Features:
---  - Account-wide saved settings (delay, buff name, sound mode/path)
---  - Sound modes:
---      * "default" = built-in UI sound (enabled by default)
---      * "none"    = silent (no sound)
---      * <path>    = custom file (falls back to built-in if it fails)
---  - Slash: /tfa help | delay | name | sound | test | status
+-- Sound modes:
+--   "default" = built-in UI sound (enabled by default)
+--   "none"    = silent
+--   <path>    = custom file (falls back to built-in if it fails)
+-- Slash: /tfa help | delay | name | sound | test | status
 
-local ADDON_VERSION = "1.0.4"
+local ADDON_VERSION = "1.0.5"
 
 TigerFuryAlert = {
   hasBuff = false,
@@ -22,11 +20,14 @@ TigerFuryAlert = {
 local defaults = {
   threshold = 4,              -- seconds before expiry
   buffName  = "Tiger's Fury", -- set with /tfa name on non-English clients
-  sound     = "default",      -- "default" | "none" | <path>; default = built-in sound
+  sound     = "default",      -- "default" | "none" | <path>
 }
 
 -- Built-in UI sound path for reliable playback on 1.12
 local DEFAULT_UI_SOUND = "Sound\\Interface\\MapPing.wav"
+
+-- Small fudge so we don't miss the moment due to frame timing/rounding
+local EPSILON = 0.15
 
 -- Hidden tooltip for name fallback on some 1.12 clients (if GetPlayerBuffName is unavailable)
 local tip = CreateFrame("GameTooltip", "TigerFuryAlertTooltip", UIParent, "GameTooltipTemplate")
@@ -56,12 +57,11 @@ local function TFA_PlayAlert()
   if mode == "" then mode = "default" end
 
   if mode == "none" then
-    return -- silent mode
+    return -- silent
   elseif mode == "default" then
     PlaySoundFile(DEFAULT_UI_SOUND)
     return
   else
-    -- custom path; if it fails, fall back to built-in
     local ok = PlaySoundFile(mode)
     if not ok then
       PlaySoundFile(DEFAULT_UI_SOUND)
@@ -98,8 +98,8 @@ function TigerFuryAlert:Scan()
 
       local tl = GetPlayerBuffTimeLeft(buff)
       local threshold = self.threshold or 4
-      if tl and tl > threshold then
-        self.played = false -- re-arm on fresh application
+      if tl and tl > (threshold + EPSILON) then
+        self.played = false -- re-arm on fresh application or if threshold increased
       end
       return
     end
@@ -128,7 +128,7 @@ function TigerFuryAlert:OnUpdate(elapsed)
   end
 
   local threshold = self.threshold or 4
-  if (tl <= threshold) and not self.played then
+  if (tl <= (threshold + EPSILON)) and not self.played then
     TFA_PlayAlert()
     self.played = true
   end
@@ -154,7 +154,7 @@ SlashCmdList["TFA"] = function(msg)
     return
   end
 
-  -- /tfa delay 2
+  -- /tfa delay 2  (Lua 5.0: use string.find capture)
   local _, _, d = string.find(lower, "^delay%s+([%d%.]+)")
   if d then
     local n = tonumber(d)
@@ -164,6 +164,8 @@ SlashCmdList["TFA"] = function(msg)
       TigerFuryAlertDB.threshold = n
       TigerFuryAlert.threshold   = n
       TigerFuryAlert.played      = false
+      TigerFuryAlert.timer       = 0
+      TigerFuryAlert:Scan() -- re-evaluate buff/time-left immediately
       Print("Delay set to "..n.."s before '"..TigerFuryAlert.buffName.."' expires. (Saved account-wide)")
       return
     else
