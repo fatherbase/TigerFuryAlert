@@ -1,13 +1,13 @@
 -- TigerFuryAlert (WoW 1.12 / Lua 5.0)
--- Version: 1.0.5
+-- Version: 1.0.8
 -- Plays a sound when Tiger's Fury is about to expire.
 -- Sound modes:
---   "default" = built-in UI sound (enabled by default)
+--   "default" = loud bell toll (built-in)
 --   "none"    = silent
---   <path>    = custom file (falls back to built-in if it fails)
--- Slash: /tfa help | delay | name | sound | test | status
+--   <path>    = custom file (falls back to default bell if it fails)
+-- Slash: /tfa (prints help) | delay | name | sound | test | status
 
-local ADDON_VERSION = "1.0.5"
+local ADDON_VERSION = "1.0.8"
 
 TigerFuryAlert = {
   hasBuff = false,
@@ -23,8 +23,8 @@ local defaults = {
   sound     = "default",      -- "default" | "none" | <path>
 }
 
--- Built-in UI sound path for reliable playback on 1.12
-local DEFAULT_UI_SOUND = "Sound\\Interface\\MapPing.wav"
+-- The "default" sound = loud bell toll (reliable & punchy in 1.12)
+local DEFAULT_BELL_SOUND = "Sound\\Doodad\\BellTollHorde.wav"
 
 -- Small fudge so we don't miss the moment due to frame timing/rounding
 local EPSILON = 0.15
@@ -36,13 +36,33 @@ local function Print(msg)
   DEFAULT_CHAT_FRAME:AddMessage("|cffff9933TigerFuryAlert:|r "..(msg or ""))
 end
 
+local function TFA_ShowHelp()
+  Print("TigerFuryAlert v"..ADDON_VERSION.." — Commands:")
+  Print("  /tfa delay <seconds>   - Alert when that many seconds remain (e.g., 2 or 4.5).")
+  Print("  /tfa name <Buff Name>  - Set the buff name (for non-English clients).")
+  Print("  /tfa sound default     - Use loud bell toll (built-in).")
+  Print("  /tfa sound none        - Disable sound (silent).")
+  Print("  /tfa sound <path>      - Use custom file path.")
+  Print("  /tfa test              - Play the alert sound using current mode.")
+  Print("  /tfa status            - Show current settings (Default / Disabled / Custom).")
+  Print("Examples:")
+  Print("  /tfa sound default")
+  Print("  /tfa sound Sound\\Spells\\Strike.wav")
+  Print("  /tfa sound none")
+end
+
 function TigerFuryAlert:InitDB()
   if not TigerFuryAlertDB then TigerFuryAlertDB = {} end
   for k, v in pairs(defaults) do
     if TigerFuryAlertDB[k] == nil then TigerFuryAlertDB[k] = v end
   end
-  -- Migrate old empty-string sound to "default"
+  -- Migrations:
+  -- 1) Old empty-string sound -> default
   if TigerFuryAlertDB.sound == "" then
+    TigerFuryAlertDB.sound = "default"
+  end
+  -- 2) From v1.0.7: if the bell path itself was saved, convert it to "default"
+  if TigerFuryAlertDB.sound == "Sound\\Doodad\\BellTollHorde.wav" then
     TigerFuryAlertDB.sound = "default"
   end
   -- mirror to runtime fields
@@ -59,12 +79,12 @@ local function TFA_PlayAlert()
   if mode == "none" then
     return -- silent
   elseif mode == "default" then
-    PlaySoundFile(DEFAULT_UI_SOUND)
+    PlaySoundFile(DEFAULT_BELL_SOUND)
     return
   else
     local ok = PlaySoundFile(mode)
     if not ok then
-      PlaySoundFile(DEFAULT_UI_SOUND)
+      PlaySoundFile(DEFAULT_BELL_SOUND)
     end
   end
 end
@@ -141,16 +161,15 @@ SlashCmdList["TFA"] = function(msg)
   msg = msg or ""
   local lower = string.lower(msg)
 
+  -- If user just types /tfa, show help immediately
+  if lower == "" then
+    TFA_ShowHelp()
+    return
+  end
+
   -- /tfa help
   if string.find(lower, "^help") then
-    Print("TigerFuryAlert v"..ADDON_VERSION.." — Commands:")
-    Print("  /tfa delay <seconds>  - Alert when that many seconds remain (e.g., 2 or 4.5).")
-    Print("  /tfa name <Buff Name> - Set the buff name (for non-English clients).")
-    Print("  /tfa sound default    - Use built-in sound (default).")
-    Print("  /tfa sound none       - Disable sound (silent).")
-    Print("  /tfa sound <path>     - Use custom file (e.g., Interface\\AddOns\\...\\alert.wav).")
-    Print("  /tfa test             - Play the alert sound using current mode.")
-    Print("  /tfa status           - Show current settings.")
+    TFA_ShowHelp()
     return
   end
 
@@ -196,15 +215,15 @@ SlashCmdList["TFA"] = function(msg)
     if modeLower == "none" then
       TigerFuryAlertDB.sound = "none"
       TigerFuryAlert.sound   = "none"
-      Print("Sound disabled (silent). (Saved account-wide)")
+      Print("Sound mode: Disabled (silent). (Saved account-wide)")
     elseif modeLower == "default" or raw == "" then
       TigerFuryAlertDB.sound = "default"
       TigerFuryAlert.sound   = "default"
-      Print("Using built-in UI sound. (Saved account-wide)")
+      Print("Sound mode: Default (bell toll). (Saved account-wide)")
     else
       TigerFuryAlertDB.sound = raw
       TigerFuryAlert.sound   = raw
-      Print("Custom sound set. Use /tfa test to preview. (Saved account-wide)")
+      Print("Sound mode: Custom ("..raw.."). Use /tfa test to preview. (Saved account-wide)")
     end
     return
   end
@@ -215,26 +234,33 @@ SlashCmdList["TFA"] = function(msg)
     return
   end
 
-  -- /tfa status
+  -- /tfa status  — shows: Default / Disabled / Custom (with path)
   if lower == "status" then
     local mode = TigerFuryAlert.sound or "default"
-    local soundDesc
+    local label, detail
     if mode == "none" then
-      soundDesc = "None (silent)"
+      label  = "Disabled"
+      detail = nil
     elseif mode == "default" or mode == "" then
-      soundDesc = "Default ("..DEFAULT_UI_SOUND..")"
+      label  = "Default"
+      detail = DEFAULT_BELL_SOUND
     else
-      soundDesc = "Custom: "..mode
+      label  = "Custom"
+      detail = mode
     end
     Print("TigerFuryAlert v"..ADDON_VERSION.." — Current settings:")
     Print("  Delay: "..(TigerFuryAlert.threshold or 4).."s")
     Print("  Buff:  "..(TigerFuryAlert.buffName or "(nil)"))
-    Print("  Sound: "..soundDesc)
+    if detail then
+      Print("  Sound: "..label.." — "..detail)
+    else
+      Print("  Sound: "..label)
+    end
     return
   end
 
-  -- Default: brief help
-  Print("Try /tfa help for commands.")
+  -- Anything else -> help
+  TFA_ShowHelp()
 end
 
 -- Frame & events -------------------------------------------------------------
