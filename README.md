@@ -1,62 +1,108 @@
 # TigerFuryAlert
 
-TigerFuryAlert (WoW 1.12)
-Vanilla (1.12, Lua 5.0) addon that plays a sound when Tiger’s Fury has ≤ x seconds left.
+**TigerFuryAlert (WoW 1.12 / Lua 5.0)**  
+Vanilla addon that plays a sound when **Tiger’s Fury** is about to expire — at a time you choose (default: **4s**). Extras: combat-only alerts, optional auto cast assist, and a master enable/disable.
+
+---
 
 ## What it does
 
-Plays a sound when Tiger's Fury is about to expire. You choose how
-many seconds remain when it alerts (default: 4s).
+- Plays a sound when Tiger’s Fury reaches your configured **X seconds remaining** (default: 4s).
+- **Sound modes**
+  - **Default** – loud **bell toll** (built-in, reliable).
+  - **None** – silent.
+  - **Custom** – any valid game sound path or your own file.
+- Optional **Combat-only** mode (alert only while in combat).
+- Optional **Auto cast assist**: tries to cast Tiger’s Fury at **2s** and **1s** remaining (may be restricted on some servers/clients).
+- Master **Enable/Disable** toggle.
+
+---
 
 ## Installation
 
-1. Put this folder in Interface\AddOns\TigerFuryAlert\
-2. (Optional) Place a short alert sound file named alert.wav
-   in the same folder, or point the addon to a different file
-   with /tfa sound <path>.
-3. Restart the game and enable TigerFuryAlert in the AddOns list.
+1. Copy the folder to:  
+   `Interface\AddOns\TigerFuryAlert\`
+2. (Optional) Add your own sound file to that folder and point the addon to it with `/tfa sound <path>`.
+3. Fully restart the game and enable **TigerFuryAlert** in the AddOns list.
 
-## Saved settings
+> You do **not** add media files (wav/mp3/ogg) to the `.toc`; they’re loaded by path at runtime.
 
-Settings are saved account-wide (TigerFuryAlertDB):
+---
 
-- Delay (seconds before expiry)
-- Buff name (for localization)
-- Sound file path
+## Saved settings (account-wide)
+
+Stored in `TigerFuryAlertDB`:
+
+- `enabled` – master switch (**ON** by default)
+- `threshold` – delay (seconds before the buff ends; default **4**)
+- `buffName` – localized name of Tiger’s Fury
+- `sound` – `"default"` (bell toll), `"none"`, or a custom file path
+- `combatOnly` – play sound only while in combat
+- `castAssist` – try casting at **2s** & **1s** remaining
+
+---
 
 ## Slash commands
 
-/tfa help
-Show this help.
+Type **`/tfa`** (no args) to print this help in chat.
 
-/tfa delay <seconds>
-Set the alert to fire when that many seconds remain on the buff.
-Examples:
-/tfa delay 2
+/tfa Show help.
+/tfa status Show current settings.
+/tfa test Play the alert sound (for testing).
+
+/tfa enable Toggle addon ON/OFF (saved).
+
+/tfa delay <seconds> Fire the alert when <seconds> remain.
+e.g. /tfa delay 2
 /tfa delay 4.5
 
-/tfa name <Buff Name>
-Set the buff name if your client is not English.
-Example (French): /tfa name Fureur du tigre
+/tfa name <Buff Name> Set localized name (non-English clients).
+e.g. /tfa name Fureur du tigre
 
-/tfa sound <path>
-Use a custom sound file.
-Example: /tfa sound Interface\AddOns\TigerFuryAlert\alert.wav
+/tfa sound default Use built-in loud bell toll (default).
+/tfa sound none Disable sound (silent).
+/tfa sound <path> Use a custom file path.
+e.g. /tfa sound Sound\Spells\Strike.wav
+/tfa sound Interface\AddOns\TigerFuryAlert\alert.wav
 
-/tfa test
-Play the current alert sound immediately.
+/tfa combat Toggle: only alert while in combat (saved).
+/tfa cast Toggle: auto cast at 2s & 1s remaining (saved).
 
-/tfa status
-Print current settings.
+## Examples
+
+/tfa sound default
+/tfa sound Sound\Doodad\BellTollHorde.wav
+/tfa sound Sound\Spells\Strike.wav
+/tfa delay 3.5
+/tfa combat
+/tfa cast
+/tfa enable
+
+---
 
 ## Notes
 
-- If you re-cast Tiger's Fury, the alert re-arms and will fire again
-  when the remaining time drops to the configured delay.
-- If your client/API lacks GetPlayerBuffName(), the addon uses a hidden
-  tooltip to read the buff's name.
+- Recasting Tiger’s Fury **re-arms** the alert for the next cycle.
+- The addon uses a tiny timing cushion so it doesn’t miss the exact moment; if you still want it earlier, try `3.9` instead of `4`.
+- On some 1.12 clients/servers, casting from code can be restricted; **auto cast assist** simply _tries_ at ~2s and ~1s.
+- If your client lacks `GetPlayerBuffName()`, the addon uses a hidden tooltip to read the buff name.
+
+---
 
 ## Troubleshooting
 
-No sound? Check the sound path and try /tfa test.
-Wrong buff name on non-English client? Use /tfa name <localized name>.
+- **No sound?**
+  - Check in-game sound settings (Enable Sound + Sound Effects).
+  - Run `/tfa test`.
+  - If using a **custom** path, verify that exact path exists and plays via `/script PlaySoundFile([[<path>]])`.
+- **Wrong buff name (non-English)?**
+  - Set it explicitly: `/tfa name <localized name>` then `/tfa status` to confirm.
+- **Nothing at the threshold?**
+  - Ensure the addon is enabled (`/tfa enable`, `/tfa status`), and that `combat` toggle matches your expectation.
+
+---
+
+## Uninstall
+
+Delete `Interface\AddOns\TigerFuryAlert\`.  
+(Optionally remove `TigerFuryAlertDB` from your SavedVariables in the WTF folder to reset settings.)

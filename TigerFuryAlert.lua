@@ -1,13 +1,17 @@
 -- TigerFuryAlert (WoW 1.12 / Lua 5.0)
--- Version: 1.0.8
+-- Version: 1.1.1
 -- Plays a sound when Tiger's Fury is about to expire.
 -- Sound modes:
 --   "default" = loud bell toll (built-in)
 --   "none"    = silent
 --   <path>    = custom file (falls back to default bell if it fails)
--- Slash: /tfa (prints help) | delay | name | sound | test | status
+-- New:
+--   * /tfa enable -> toggle addon ON/OFF (saved)
+--   * /tfa combat -> toggle "play sound only while in combat" (saved)
+--   * /tfa cast   -> toggle "auto cast assist at 2s & 1s left" (saved)
+-- Slash: /tfa (help) | delay | name | sound | enable | combat | cast | test | status
 
-local ADDON_VERSION = "1.0.8"
+local ADDON_VERSION = "1.1.1"
 
 TigerFuryAlert = {
   hasBuff = false,
@@ -15,15 +19,22 @@ TigerFuryAlert = {
   played  = false,
   timer   = 0,
   version = ADDON_VERSION,
+
+  -- runtime flags for cast assist
+  castAttempt2Done = false,
+  castAttempt1Done = false,
 }
 
 local defaults = {
-  threshold = 4,              -- seconds before expiry
-  buffName  = "Tiger's Fury", -- set with /tfa name on non-English clients
-  sound     = "default",      -- "default" | "none" | <path>
+  enabled    = true,           -- master switch
+  threshold  = 4,              -- seconds before expiry
+  buffName   = "Tiger's Fury", -- set with /tfa name on non-English clients
+  sound      = "default",      -- "default" | "none" | <path>
+  combatOnly = false,          -- if true, play sound only while in combat
+  castAssist = false,          -- if true, attempt to cast at 2s and 1s remaining
 }
 
--- The "default" sound = loud bell toll (reliable & punchy in 1.12)
+-- "default" sound = loud bell toll (reliable & punchy in 1.12)
 local DEFAULT_BELL_SOUND = "Sound\\Doodad\\BellTollHorde.wav"
 
 -- Small fudge so we don't miss the moment due to frame timing/rounding
@@ -36,19 +47,32 @@ local function Print(msg)
   DEFAULT_CHAT_FRAME:AddMessage("|cffff9933TigerFuryAlert:|r "..(msg or ""))
 end
 
+local function InCombat()
+  if UnitAffectingCombat then
+    return UnitAffectingCombat("player")
+  end
+  return false
+end
+
 local function TFA_ShowHelp()
   Print("TigerFuryAlert v"..ADDON_VERSION.." — Commands:")
+  Print("  /tfa enable            - Toggle addon ON/OFF (saved).")
   Print("  /tfa delay <seconds>   - Alert when that many seconds remain (e.g., 2 or 4.5).")
   Print("  /tfa name <Buff Name>  - Set the buff name (for non-English clients).")
   Print("  /tfa sound default     - Use loud bell toll (built-in).")
   Print("  /tfa sound none        - Disable sound (silent).")
   Print("  /tfa sound <path>      - Use custom file path.")
+  Print("  /tfa combat            - Toggle sound only while in combat (saved).")
+  Print("  /tfa cast              - Toggle auto cast assist at 2s & 1s (saved).")
   Print("  /tfa test              - Play the alert sound using current mode.")
-  Print("  /tfa status            - Show current settings (Default / Disabled / Custom).")
+  Print("  /tfa status            - Show current settings.")
   Print("Examples:")
   Print("  /tfa sound default")
   Print("  /tfa sound Sound\\Spells\\Strike.wav")
   Print("  /tfa sound none")
+  Print("  /tfa enable")
+  Print("  /tfa combat")
+  Print("  /tfa cast")
 end
 
 function TigerFuryAlert:InitDB()
@@ -57,21 +81,22 @@ function TigerFuryAlert:InitDB()
     if TigerFuryAlertDB[k] == nil then TigerFuryAlertDB[k] = v end
   end
   -- Migrations:
-  -- 1) Old empty-string sound -> default
   if TigerFuryAlertDB.sound == "" then
     TigerFuryAlertDB.sound = "default"
   end
-  -- 2) From v1.0.7: if the bell path itself was saved, convert it to "default"
   if TigerFuryAlertDB.sound == "Sound\\Doodad\\BellTollHorde.wav" then
     TigerFuryAlertDB.sound = "default"
   end
   -- mirror to runtime fields
-  self.threshold = TigerFuryAlertDB.threshold
-  self.buffName  = TigerFuryAlertDB.buffName
-  self.sound     = TigerFuryAlertDB.sound
+  self.enabled    = TigerFuryAlertDB.enabled
+  self.threshold  = TigerFuryAlertDB.threshold
+  self.buffName   = TigerFuryAlertDB.buffName
+  self.sound      = TigerFuryAlertDB.sound
+  self.combatOnly = TigerFuryAlertDB.combatOnly
+  self.castAssist = TigerFuryAlertDB.castAssist
 end
 
--- Safe sound playback honoring "none"/"default"/<path>
+-- Safe sound playback honoring "none"/"default"/<path> (master enable checked elsewhere)
 local function TFA_PlayAlert()
   local mode = TigerFuryAlert.sound or "default"
   if mode == "" then mode = "default" end
@@ -89,6 +114,15 @@ local function TFA_PlayAlert()
   end
 end
 
+-- Attempt to cast Tiger's Fury by name (localized)
+function TigerFuryAlert:TryCastTigerFury()
+  if not self.enabled then return end
+  if SpellIsTargeting and SpellIsTargeting() then
+    SpellStopTargeting()
+  end
+  CastSpellByName(self.buffName)
+end
+
 -- Compatibility: get buff name even if GetPlayerBuffName() isn't present
 local function GetBuffNameCompat(buff)
   if GetPlayerBuffName then
@@ -100,6 +134,12 @@ local function GetBuffNameCompat(buff)
   local txt = r and r:GetText() or nil
   tip:Hide()
   return txt
+end
+
+function TigerFuryAlert:ResetCycleFlags()
+  self.played = false
+  self.castAttempt2Done = false
+  self.castAttempt1Done = false
 end
 
 function TigerFuryAlert:Scan()
@@ -119,18 +159,20 @@ function TigerFuryAlert:Scan()
       local tl = GetPlayerBuffTimeLeft(buff)
       local threshold = self.threshold or 4
       if tl and tl > (threshold + EPSILON) then
-        self.played = false -- re-arm on fresh application or if threshold increased
+        self:ResetCycleFlags()
       end
       return
     end
     i = i + 1
   end
 
-  -- fell off -> re-arm for next time
-  self.played = false
+  self:ResetCycleFlags()
 end
 
 function TigerFuryAlert:OnUpdate(elapsed)
+  -- Master enable check
+  if not self.enabled then return end
+
   -- Lua 5.0/Vanilla fallback: 'elapsed' may be in global arg1
   if not elapsed then elapsed = arg1 end
   if not elapsed or elapsed <= 0 then return end
@@ -148,9 +190,25 @@ function TigerFuryAlert:OnUpdate(elapsed)
   end
 
   local threshold = self.threshold or 4
+
+  -- Play sound at threshold (respect combatOnly toggle)
   if (tl <= (threshold + EPSILON)) and not self.played then
-    TFA_PlayAlert()
+    if (not self.combatOnly) or InCombat() then
+      TFA_PlayAlert()
+    end
     self.played = true
+  end
+
+  -- Auto cast assist at 2s and 1s, if enabled and in combat
+  if self.castAssist and InCombat() then
+    if (tl <= (2 + EPSILON)) and not self.castAttempt2Done then
+      self:TryCastTigerFury()
+      self.castAttempt2Done = true
+    end
+    if (tl <= (1 + EPSILON)) and not self.castAttempt1Done then
+      self:TryCastTigerFury()
+      self.castAttempt1Done = true
+    end
   end
 end
 
@@ -161,7 +219,7 @@ SlashCmdList["TFA"] = function(msg)
   msg = msg or ""
   local lower = string.lower(msg)
 
-  -- If user just types /tfa, show help immediately
+  -- If user just types /tfa, show help
   if lower == "" then
     TFA_ShowHelp()
     return
@@ -170,6 +228,17 @@ SlashCmdList["TFA"] = function(msg)
   -- /tfa help
   if string.find(lower, "^help") then
     TFA_ShowHelp()
+    return
+  end
+
+  -- /tfa enable  -> toggle master enable
+  if lower == "enable" then
+    TigerFuryAlertDB.enabled = not TigerFuryAlertDB.enabled
+    TigerFuryAlert.enabled   = TigerFuryAlertDB.enabled
+    Print("Addon enabled: "..(TigerFuryAlert.enabled and "ON" or "OFF")..". (Saved)")
+    -- Re-arm cycle flags so state changes take effect cleanly
+    TigerFuryAlert:ResetCycleFlags()
+    TigerFuryAlert.timer = 0
     return
   end
 
@@ -184,8 +253,8 @@ SlashCmdList["TFA"] = function(msg)
       TigerFuryAlert.threshold   = n
       TigerFuryAlert.played      = false
       TigerFuryAlert.timer       = 0
-      TigerFuryAlert:Scan() -- re-evaluate buff/time-left immediately
-      Print("Delay set to "..n.."s before '"..TigerFuryAlert.buffName.."' expires. (Saved account-wide)")
+      TigerFuryAlert:Scan()
+      Print("Delay set to "..n.."s before '"..TigerFuryAlert.buffName.."' expires. (Saved)")
       return
     else
       Print("Usage: /tfa delay <seconds>")
@@ -200,7 +269,7 @@ SlashCmdList["TFA"] = function(msg)
       TigerFuryAlertDB.buffName = newName
       TigerFuryAlert.buffName   = newName
       TigerFuryAlert:Scan()
-      Print("Buff name set to '"..newName.."'. (Saved account-wide)")
+      Print("Buff name set to '"..newName.."'. (Saved)")
     else
       Print("Usage: /tfa name <Buff Name>")
     end
@@ -215,26 +284,44 @@ SlashCmdList["TFA"] = function(msg)
     if modeLower == "none" then
       TigerFuryAlertDB.sound = "none"
       TigerFuryAlert.sound   = "none"
-      Print("Sound mode: Disabled (silent). (Saved account-wide)")
+      Print("Sound mode: Disabled (silent). (Saved)")
     elseif modeLower == "default" or raw == "" then
       TigerFuryAlertDB.sound = "default"
       TigerFuryAlert.sound   = "default"
-      Print("Sound mode: Default (bell toll). (Saved account-wide)")
+      Print("Sound mode: Default (bell toll). (Saved)")
     else
       TigerFuryAlertDB.sound = raw
       TigerFuryAlert.sound   = raw
-      Print("Sound mode: Custom ("..raw.."). Use /tfa test to preview. (Saved account-wide)")
+      Print("Sound mode: Custom ("..raw.."). Use /tfa test to preview. (Saved)")
     end
     return
   end
 
-  -- /tfa test
+  -- /tfa combat  -> toggle combat-only sound
+  if lower == "combat" then
+    TigerFuryAlertDB.combatOnly = not TigerFuryAlertDB.combatOnly
+    TigerFuryAlert.combatOnly   = TigerFuryAlertDB.combatOnly
+    Print("Combat-only sound: "..(TigerFuryAlert.combatOnly and "ON" or "OFF")..". (Saved)")
+    return
+  end
+
+  -- /tfa cast  -> toggle auto cast assist
+  if lower == "cast" then
+    TigerFuryAlertDB.castAssist = not TigerFuryAlertDB.castAssist
+    TigerFuryAlert.castAssist   = TigerFuryAlertDB.castAssist
+    TigerFuryAlert.castAttempt2Done = false
+    TigerFuryAlert.castAttempt1Done = false
+    Print("Auto cast assist: "..(TigerFuryAlert.castAssist and "ON (tries at 2s & 1s)" or "OFF")..". (Saved)")
+    return
+  end
+
+  -- /tfa test (plays even if addon is disabled, for auditioning)
   if lower == "test" then
     TFA_PlayAlert()
     return
   end
 
-  -- /tfa status  — shows: Default / Disabled / Custom (with path)
+  -- /tfa status  — show Enabled + other settings
   if lower == "status" then
     local mode = TigerFuryAlert.sound or "default"
     local label, detail
@@ -249,13 +336,16 @@ SlashCmdList["TFA"] = function(msg)
       detail = mode
     end
     Print("TigerFuryAlert v"..ADDON_VERSION.." — Current settings:")
-    Print("  Delay: "..(TigerFuryAlert.threshold or 4).."s")
-    Print("  Buff:  "..(TigerFuryAlert.buffName or "(nil)"))
+    Print("  Enabled: "..(TigerFuryAlert.enabled and "ON" or "OFF"))
+    Print("  Delay:   "..(TigerFuryAlert.threshold or 4).."s")
+    Print("  Buff:    "..(TigerFuryAlert.buffName or "(nil)"))
     if detail then
-      Print("  Sound: "..label.." — "..detail)
+      Print("  Sound:   "..label.." — "..detail)
     else
-      Print("  Sound: "..label)
+      Print("  Sound:   "..label)
     end
+    Print("  Combat-only sound: "..(TigerFuryAlert.combatOnly and "ON" or "OFF"))
+    Print("  Auto cast assist:   "..(TigerFuryAlert.castAssist and "ON (tries at 2s & 1s)" or "OFF"))
     return
   end
 
