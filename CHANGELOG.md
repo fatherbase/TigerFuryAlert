@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.6
+
+- **Fix/Improve:** Self-cast targeting for spellbook/name paths (`SpellTargetUnit("player")`, `CastSpellByName(..., 1)`).
+- **Improve:** Extended post-expiry retry window (0s, +1s, +2s).
+- **New:** `/tfa castnow` — try to cast immediately (testing).
+- **Fix:** Slot learn wrapper now forwards arguments properly on Lua 5.0.
+
 ## 1.1.5
 
 - **New:** `/tfa slot learn` to capture the next action you press (no slot number needed).

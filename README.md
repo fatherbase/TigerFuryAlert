@@ -3,6 +3,13 @@
 **TigerFuryAlert (WoW 1.12 / Lua 5.0)**  
 Vanilla addon that plays a sound when **Tiger’s Fury** is about to expire — at a time you choose (default: **4s**). Extras: combat-only alerts, optional auto-cast assist, a master enable/disable, and slot learning so it can press your macro/button.
 
+...
+
+### Useful testing
+
+/tfa castnow # immediately tries to cast using your configured slot/spell
+/tfa debug # show detailed logs (session only)
+
 ---
 
 ## What it does
@@ -99,6 +106,11 @@ e.g. /tfa sound Sound\Spells\Strike.wav
 - If your client lacks `GetPlayerBuffName()`, the addon uses a hidden tooltip to read the buff name.
 
 ---
+
+### Notes on auto-cast
+
+Some 1.12/private servers block addon-driven casts outside a hardware click.  
+The addon now tries `UseAction(slot, 0, 1)` (self-cast), then spellbook, then ranked/plain `CastSpellByName(..., 1)`, and also retries after the buff expires. If **/tfa castnow** in combat doesn’t fire, your server is likely blocking automated casts; use the bell alert + press your macro (slot learning helps).
 
 ## Troubleshooting
 

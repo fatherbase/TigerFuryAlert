@@ -1,5 +1,5 @@
 -- TigerFuryAlert (WoW 1.12 / Lua 5.0)
--- Version: 1.1.5
+-- Version: 1.1.6
 -- Plays a sound when Tiger's Fury is about to expire.
 -- Sound modes:
 --   "default" = loud bell toll (built-in)
@@ -8,7 +8,7 @@
 -- Toggles (saved):
 --   /tfa enable  - master ON/OFF
 --   /tfa combat  - sound only in combat
---   /tfa cast    - auto cast at 2s & 1s; also tries right after buff expires
+--   /tfa cast    - auto cast at 2s & 1s; also tries after the buff expires
 -- Cast sources (optional):
 --   /tfa slot <1-120>   - use an action bar slot
 --   /tfa slot learn     - capture the next action you press
@@ -16,6 +16,8 @@
 --   /tfa spell <name>   - set spell name if it differs from the buff
 -- Debug (NOT saved):
 --   /tfa debug          - toggle debug logging (session only; always OFF on startup)
+-- Utilities:
+--   /tfa castnow        - try to cast immediately (ignores timers) for testing
 -- Other:
 --   /tfa, /tfa help     - show help
 --   /tfa delay <sec>    - set alert threshold
@@ -23,7 +25,7 @@
 --   /tfa test           - play current alert sound
 --   /tfa status         - print settings
 
-local ADDON_VERSION = "1.1.5"
+local ADDON_VERSION = "1.1.6"
 
 TigerFuryAlert = {
   -- state
@@ -105,6 +107,7 @@ local function TFA_ShowHelp()
   Print("  /tfa slot learn        - Capture the next action you press.")
   Print("  /tfa slot cancel       - Cancel slot learning.")
   Print("  /tfa spell <name>      - Set spell name to cast (saved).")
+  Print("  /tfa castnow           - Try to cast immediately (testing).")
   Print("  /tfa debug             - Toggle debug logging (session only, NOT saved).")
   Print("  /tfa test              - Play current alert sound.")
   Print("  /tfa status            - Show current settings.")
@@ -222,12 +225,12 @@ end
 function TigerFuryAlert:TryCastTigerFury()
   if not self.enabled then return end
 
-  -- Prefer action slot, if provided
+  -- Prefer action slot, if provided (force self-cast arg3=1 to avoid targeting issues)
   if self.castSlot and UseAction then
     local slot = tonumber(self.castSlot)
     if slot and slot >= 1 and slot <= 120 then
-      DPrint("Casting via UseAction(slot="..slot..")")
-      UseAction(slot)
+      DPrint("Casting via UseAction(slot="..slot..", onSelf=1)")
+      UseAction(slot, 0, 1)
       return
     end
   end
@@ -237,23 +240,39 @@ function TigerFuryAlert:TryCastTigerFury()
   if idx and CastSpell and CooldownReadyByIndex(idx) then
     DPrint("Casting via CastSpell(idx="..idx..")")
     CastSpell(idx, "spell")
+    if SpellIsTargeting and SpellIsTargeting() then
+      DPrint("Spell was targeting -> SpellTargetUnit('player')")
+      if SpellTargetUnit then
+        SpellTargetUnit("player")
+      else
+        SpellStopTargeting()
+      end
+    end
     return
   end
 
-  -- Fallback: cast by ranked name, then plain name
+  -- Fallback: cast by ranked name (self-cast), then ranked (no flag), then plain (self), then plain
   if CastSpellByName then
     local nm = self.castSpellName or self.buffName
     if nm and nm ~= "" then
       local ranked = RankedName(nm, rkTxt)
       if ranked then
         if SpellIsTargeting and SpellIsTargeting() then SpellStopTargeting() end
-        DPrint("Casting via CastSpellByName('"..ranked.."')")
-        CastSpellByName(ranked)
+        DPrint("Casting via CastSpellByName('"..ranked.."', 1)")
+        CastSpellByName(ranked, 1) -- on self if supported
+        if SpellIsTargeting and SpellIsTargeting() then
+          DPrint("Still targeting -> SpellTargetUnit('player')")
+          if SpellTargetUnit then SpellTargetUnit("player") else SpellStopTargeting() end
+        end
         return
       end
       if SpellIsTargeting and SpellIsTargeting() then SpellStopTargeting() end
-      DPrint("Casting via CastSpellByName('"..nm.."')")
-      CastSpellByName(nm)
+      DPrint("Casting via CastSpellByName('"..nm.."', 1)")
+      CastSpellByName(nm, 1)
+      if SpellIsTargeting and SpellIsTargeting() then
+        DPrint("Still targeting -> SpellTargetUnit('player')")
+        if SpellTargetUnit then SpellTargetUnit("player") else SpellStopTargeting() end
+      end
     end
   end
 end
@@ -366,13 +385,14 @@ function TigerFuryAlert:OnUpdate(elapsed)
   else
     if self.castAssist and InCombat() and self.justExpiredTime then
       local now = GetTime and GetTime() or 0
-      if self.postAttempts < 2 and self.postNextAttempt and now + 0.01 >= self.postNextAttempt then
+      -- Try at 0s, +1s, +2s after expiry
+      if self.postAttempts < 3 and self.postNextAttempt and now + 0.01 >= self.postNextAttempt then
         DPrint("Post-expiry cast attempt #"..(self.postAttempts + 1))
         self:TryCastTigerFury()
         self.postAttempts = self.postAttempts + 1
         self.postNextAttempt = now + 1
       end
-      if (now - self.justExpiredTime) > 2.5 then
+      if (now - self.justExpiredTime) > 3.2 then
         DPrint("Post-expiry window ended")
         self.justExpiredTime = nil
         self.postNextAttempt = nil
@@ -390,8 +410,9 @@ function TigerFuryAlert:BeginLearnSlot()
   self._origUseAction = UseAction
   Print("Slot learning: press your Tiger's Fury button now... (/tfa slot cancel to abort)")
 
-  -- Wrap UseAction to capture the next slot pressed
+  -- Wrap UseAction to capture the next slot pressed (Lua 5.0 varargs via 'arg')
   UseAction = function(slot)
+    local a1, a2 = arg and arg[1], arg and arg[2]
     if TigerFuryAlert.learningSlot then
       TigerFuryAlert.learningSlot = false
       TigerFuryAlertDB.castSlot = slot
@@ -401,13 +422,13 @@ function TigerFuryAlert:BeginLearnSlot()
         local f = TigerFuryAlert._origUseAction
         TigerFuryAlert._origUseAction = nil
         UseAction = f
-        -- forward the original click
-        f(slot)
+        -- forward the original click with args preserved
+        f(slot, a1, a2)
       end
       return
     end
     if TigerFuryAlert._origUseAction then
-      return TigerFuryAlert._origUseAction(slot)
+      return TigerFuryAlert._origUseAction(slot, a1, a2)
     end
   end
 end
@@ -544,6 +565,12 @@ SlashCmdList["TFA"] = function(msg)
     else
       Print("Usage: /tfa spell <Spell Name>")
     end
+    return
+  end
+
+  if lower == "castnow" then
+    DPrint("Manual castnow invoked")
+    TigerFuryAlert:TryCastTigerFury()
     return
   end
 
