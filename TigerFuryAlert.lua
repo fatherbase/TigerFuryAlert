@@ -1,5 +1,5 @@
 -- TigerFuryAlert (WoW 1.12 / Lua 5.0)
--- Version: 1.1.2
+-- Version: 1.1.3
 -- Plays a sound when Tiger's Fury is about to expire.
 -- Sound modes:
 --   "default" = loud bell toll (built-in)
@@ -8,13 +8,13 @@
 -- Toggles:
 --   /tfa enable  - master ON/OFF (saved)
 --   /tfa combat  - sound only in combat (saved)
---   /tfa cast    - auto cast assist at 2s & 1s (saved)
--- Cast assist extras:
---   /tfa slot <n>  - set action bar slot (1-120) to cast from (saved)
---   /tfa spell <name> - set spell name (if differs from buff name) (saved)
+--   /tfa cast    - auto cast at 2s & 1s; also tries right after buff expires (saved)
+-- Optional (not required):
+--   /tfa slot <1-120>   - use action bar slot if you want (saved)
+--   /tfa spell <name>   - set spell name if different from buff (saved)
 -- Slash: /tfa (help) | delay | name | sound | enable | combat | cast | slot | spell | test | status
 
-local ADDON_VERSION = "1.1.2"
+local ADDON_VERSION = "1.1.3"
 
 TigerFuryAlert = {
   hasBuff = false,
@@ -23,29 +23,35 @@ TigerFuryAlert = {
   timer   = 0,
   version = ADDON_VERSION,
 
-  -- runtime flags for cast assist
+  -- cast assist flags
   castAttempt2Done = false,
   castAttempt1Done = false,
 
-  -- cached spellbook index
-  spellIndex = nil,
+  -- spellbook cache
+  spellIndex   = nil,
+  spellRankTxt = nil,
+
+  -- post-expiry recast window
+  justExpiredTime = nil,
+  postNextAttempt = nil,
+  postAttempts    = 0,
 }
 
 local defaults = {
-  enabled     = true,           -- master switch
-  threshold   = 4,              -- seconds before expiry
-  buffName    = "Tiger's Fury", -- set with /tfa name on non-English clients
-  sound       = "default",      -- "default" | "none" | <path>
-  combatOnly  = false,          -- if true, play sound only while in combat
-  castAssist  = false,          -- if true, attempt to cast at 2s and 1s remaining
-  castSlot    = nil,            -- action bar slot (1..120); if set, UseAction(slot)
-  castSpellName = nil,          -- optional explicit spell name (falls back to buffName)
+  enabled       = true,            -- master switch
+  threshold     = 4,               -- seconds before expiry
+  buffName      = "Tiger's Fury",  -- set with /tfa name on non-English clients
+  sound         = "default",       -- "default" | "none" | <path>
+  combatOnly    = false,           -- play sound only in combat
+  castAssist    = false,           -- pre-expiry (2s/1s) + post-expiry tries
+  castSlot      = nil,             -- optional action bar slot (1..120)
+  castSpellName = nil,             -- optional explicit spell name (falls back to buffName)
 }
 
 -- "default" sound = loud bell toll (reliable in 1.12)
 local DEFAULT_BELL_SOUND = "Sound\\Doodad\\BellTollHorde.wav"
 
--- Small cushion so we don't miss moments due to frame timing/rounding
+-- Small cushion so we don't miss exact moments due to frame timing/rounding
 local EPSILON = 0.15
 
 -- Hidden tooltip for name fallback on some 1.12 clients (if GetPlayerBuffName is unavailable)
@@ -62,27 +68,6 @@ local function InCombat()
   return false
 end
 
--- Light checks to reduce pointless casts
-local function InCatForm()
-  if GetShapeshiftForm then
-    local idx = GetShapeshiftForm()
-    return idx and idx > 0 -- any form; cat-specific detection is locale tricky; OK to just try.
-  end
-  return true
-end
-
-local function HasEnoughEnergy(minEnergy)
-  minEnergy = minEnergy or 30
-  if UnitMana and UnitPowerType then
-    local pType = UnitPowerType("player")
-    if pType == 3 then -- 3 = Energy in 1.12
-      return UnitMana("player") >= minEnergy
-    end
-  end
-  -- If we can't tell, just allow the attempt.
-  return true
-end
-
 local function TFA_ShowHelp()
   Print("TigerFuryAlert v"..ADDON_VERSION.." — Commands:")
   Print("  /tfa enable            - Toggle addon ON/OFF (saved).")
@@ -92,16 +77,12 @@ local function TFA_ShowHelp()
   Print("  /tfa sound none        - Disable sound (silent).")
   Print("  /tfa sound <path>      - Use custom file path.")
   Print("  /tfa combat            - Toggle sound only while in combat (saved).")
-  Print("  /tfa cast              - Toggle auto cast assist at 2s & 1s (saved).")
-  Print("  /tfa slot <1-120>      - Set action bar slot to cast from (saved).")
-  Print("  /tfa spell <name>      - Set spell name for casting (saved).")
+  Print("  /tfa cast              - Toggle auto cast assist (2s & 1s + post-expiry) (saved).")
+  Print("  /tfa slot <1-120>      - (Optional) set an action bar slot to cast from (saved).")
+  Print("  /tfa spell <name>      - (Optional) set spell name to cast (saved).")
   Print("  /tfa test              - Play current alert sound.")
   Print("  /tfa status            - Show current settings.")
-  Print("Examples:")
-  Print("  /tfa sound default")
-  Print("  /tfa sound Sound\\Spells\\Strike.wav")
-  Print("  /tfa slot 37   (place Tiger's Fury on that slot)")
-  Print("  /tfa spell Tiger's Fury")
+  Print("Examples: /tfa sound default  |  /tfa delay 3.5  |  /tfa cast")
 end
 
 function TigerFuryAlert:InitDB()
@@ -116,7 +97,7 @@ function TigerFuryAlert:InitDB()
   if TigerFuryAlertDB.sound == "Sound\\Doodad\\BellTollHorde.wav" then
     TigerFuryAlertDB.sound = "default"
   end
-  -- mirror to runtime fields
+  -- mirror to runtime
   self.enabled       = TigerFuryAlertDB.enabled
   self.threshold     = TigerFuryAlertDB.threshold
   self.buffName      = TigerFuryAlertDB.buffName
@@ -125,7 +106,8 @@ function TigerFuryAlert:InitDB()
   self.castAssist    = TigerFuryAlertDB.castAssist
   self.castSlot      = TigerFuryAlertDB.castSlot
   self.castSpellName = TigerFuryAlertDB.castSpellName
-  self.spellIndex    = nil -- will resolve on first use
+  self.spellIndex    = nil
+  self.spellRankTxt  = nil
 end
 
 -- Safe sound playback honoring "none"/"default"/<path>
@@ -146,39 +128,50 @@ local function TFA_PlayAlert()
   end
 end
 
--- Spellbook search (1.12): find "Tiger's Fury" index in BOOKTYPE_SPELL
+-- Spellbook search (1.12): find highest-rank index + rank text for the given name
 function TigerFuryAlert:FindSpellIndexByName(name)
-  if not name or name == "" then return nil end
+  if not name or name == "" then return nil, nil end
   if GetNumSpellTabs and GetSpellTabInfo and GetSpellName then
+    local bestIdx, bestRankNum, bestRankTxt = nil, -1, nil
     local tabs = GetNumSpellTabs()
     for t = 1, tabs do
       local _, _, offset, numSpells = GetSpellTabInfo(t)
       if offset and numSpells then
         for s = 1, numSpells do
           local idx = offset + s
-          local nm, _ = GetSpellName(idx, "spell")
+          local nm, rk = GetSpellName(idx, "spell")
           if nm == name then
-            return idx
+            local num = -1
+            if rk and rk ~= "" then
+              -- rk looks like "Rank X" (localized); try to grab the number
+              local _, _, n = string.find(rk, "(%d+)")
+              if n then num = tonumber(n) end
+            end
+            if not bestIdx or num > bestRankNum then
+              bestIdx, bestRankNum, bestRankTxt = idx, num, rk
+            end
           end
         end
       end
     end
+    return bestIdx, bestRankTxt
   end
-  return nil
+  return nil, nil
 end
 
 function TigerFuryAlert:GetSpellIndex()
-  if self.spellIndex then return self.spellIndex end
+  if self.spellIndex then return self.spellIndex, self.spellRankTxt end
   local name = self.castSpellName or self.buffName
-  self.spellIndex = self:FindSpellIndexByName(name)
-  return self.spellIndex
+  local idx, rk = self:FindSpellIndexByName(name)
+  self.spellIndex, self.spellRankTxt = idx, rk
+  return idx, rk
 end
 
 local function CooldownReadyByIndex(idx)
   if not idx then return true end
   if GetSpellCooldown then
     local start, duration, enable = GetSpellCooldown(idx, "spell")
-    if start == nil or duration == nil then return true end
+    if not start or not duration then return true end
     if start == 0 or duration == 0 then return true end
     local now = GetTime and GetTime() or 0
     return (start + duration) <= (now + 0.05)
@@ -186,20 +179,19 @@ local function CooldownReadyByIndex(idx)
   return true
 end
 
+local function RankedName(name, rankTxt)
+  if not name then return nil end
+  if not rankTxt or rankTxt == "" then return name end
+  -- 1.12 expects "Name(Rank X)" with no space before '('
+  return name .. "(" .. rankTxt .. ")"
+end
+
 -- Attempt to cast Tiger's Fury:
 -- 1) If an action slot is configured -> UseAction(slot)
 -- 2) Else if we have a spellbook index -> CastSpell(index, "spell")
--- 3) Else -> CastSpellByName(fallbackName)
+-- 3) Else -> CastSpellByName("Name(Rank X)") then "Name"
 function TigerFuryAlert:TryCastTigerFury()
   if not self.enabled then return end
-
-  -- Optional sanity checks (won't block if unavailable)
-  if not InCatForm() then
-    -- Many servers require Cat Form; still try cast (it may shift or fail silently)
-  end
-  if not HasEnoughEnergy(30) then
-    -- Not enough energy; still try (server may queue/ignore)
-  end
 
   -- Prefer action slot, if provided
   if self.castSlot and UseAction then
@@ -210,22 +202,26 @@ function TigerFuryAlert:TryCastTigerFury()
     end
   end
 
-  -- Use spellbook index if available and off cooldown
-  local idx = self:GetSpellIndex()
-  if idx and CooldownReadyByIndex(idx) then
-    if CastSpell then
-      CastSpell(idx, "spell")
-      return
-    end
+  -- Use spellbook index if available and ready
+  local idx, rkTxt = self:GetSpellIndex()
+  if idx and CastSpell and CooldownReadyByIndex(idx) then
+    CastSpell(idx, "spell")
+    return
   end
 
-  -- Fallback: cast by name (may fail on some servers/locales)
-  local byName = self.castSpellName or self.buffName
-  if byName and CastSpellByName then
-    if SpellIsTargeting and SpellIsTargeting() then
-      SpellStopTargeting()
+  -- Fallback: cast by name, prefer ranked
+  if CastSpellByName then
+    local nm = self.castSpellName or self.buffName
+    if nm and nm ~= "" then
+      local ranked = RankedName(nm, rkTxt)
+      if ranked then
+        if SpellIsTargeting and SpellIsTargeting() then SpellStopTargeting() end
+        CastSpellByName(ranked)
+        return
+      end
+      if SpellIsTargeting and SpellIsTargeting() then SpellStopTargeting() end
+      CastSpellByName(nm)
     end
-    CastSpellByName(byName)
   end
 end
 
@@ -249,6 +245,9 @@ function TigerFuryAlert:ResetCycleFlags()
 end
 
 function TigerFuryAlert:Scan()
+  -- Track whether it was active before this scan
+  local wasActive = self.hasBuff
+
   self.hasBuff = false
   self.buffId  = nil
 
@@ -267,9 +266,22 @@ function TigerFuryAlert:Scan()
       if tl and tl > (threshold + EPSILON) then
         self:ResetCycleFlags()
       end
+      -- While buff is active, cancel any post-expiry window
+      self.justExpiredTime = nil
+      self.postNextAttempt = nil
+      self.postAttempts    = 0
       return
     end
     i = i + 1
+  end
+
+  -- Buff not found
+  if wasActive then
+    -- Just expired now: open a short post-expiry recast window (for servers that forbid refreshing)
+    local now = GetTime and GetTime() or nil
+    self.justExpiredTime = now
+    self.postNextAttempt = now           -- try immediately
+    self.postAttempts    = 0
   end
 
   self:ResetCycleFlags()
@@ -283,37 +295,57 @@ function TigerFuryAlert:OnUpdate(elapsed)
   if not elapsed then elapsed = arg1 end
   if not elapsed or elapsed <= 0 then return end
 
-  if not self.hasBuff or not self.buffId then return end
-
   self.timer = (self.timer or 0) + elapsed
   if self.timer < 0.10 then return end -- throttle ~10/sec
   self.timer = 0
 
-  local tl = GetPlayerBuffTimeLeft(self.buffId)
-  if not tl then
-    self:Scan()
-    return
+  local tl = nil
+  if self.hasBuff and self.buffId then
+    tl = GetPlayerBuffTimeLeft(self.buffId)
+    if not tl then
+      self:Scan()
+      return
+    end
   end
 
   local threshold = self.threshold or 4
 
-  -- Play sound at threshold (respect combatOnly)
-  if (tl <= (threshold + EPSILON)) and not self.played then
-    if (not self.combatOnly) or InCombat() then
-      TFA_PlayAlert()
+  -- If buff is active, handle sound + pre-expiry cast attempts
+  if tl then
+    -- Play sound at threshold (respect combatOnly)
+    if (tl <= (threshold + EPSILON)) and not self.played then
+      if (not self.combatOnly) or InCombat() then
+        TFA_PlayAlert()
+      end
+      self.played = true
     end
-    self.played = true
-  end
 
-  -- Auto cast assist at 2s and 1s, if enabled and in combat
-  if self.castAssist and InCombat() then
-    if (tl <= (2 + EPSILON)) and not self.castAttempt2Done then
-      self:TryCastTigerFury()
-      self.castAttempt2Done = true
+    -- Auto-cast assist at 2s and 1s, if enabled and in combat
+    if self.castAssist and InCombat() then
+      if (tl <= (2 + EPSILON)) and not self.castAttempt2Done then
+        self:TryCastTigerFury()
+        self.castAttempt2Done = true
+      end
+      if (tl <= (1 + EPSILON)) and not self.castAttempt1Done then
+        self:TryCastTigerFury()
+        self.castAttempt1Done = true
+      end
     end
-    if (tl <= (1 + EPSILON)) and not self.castAttempt1Done then
-      self:TryCastTigerFury()
-      self.castAttempt1Done = true
+  else
+    -- Buff not active: if castAssist is on and we’re in combat, use post-expiry recast window
+    if self.castAssist and InCombat() and self.justExpiredTime then
+      local now = GetTime and GetTime() or 0
+      -- Try immediately when it drops, then again 1s later; stop after ~2.5s
+      if self.postAttempts < 2 and self.postNextAttempt and now + 0.01 >= self.postNextAttempt then
+        self:TryCastTigerFury()
+        self.postAttempts = self.postAttempts + 1
+        self.postNextAttempt = now + 1
+      end
+      if (now - self.justExpiredTime) > 2.5 then
+        self.justExpiredTime = nil
+        self.postNextAttempt = nil
+        self.postAttempts    = 0
+      end
     end
   end
 end
@@ -361,7 +393,7 @@ SlashCmdList["TFA"] = function(msg)
     end
   end
 
-  -- /tfa name <Buff Name>
+  -- /tfa name <Localized Buff Name>
   if string.find(lower, "^name%s+") then
     local newName = string.sub(msg, 6) -- preserve case
     if newName and newName ~= "" then
@@ -407,7 +439,7 @@ SlashCmdList["TFA"] = function(msg)
     TigerFuryAlert.castAssist   = TigerFuryAlertDB.castAssist
     TigerFuryAlert.castAttempt2Done = false
     TigerFuryAlert.castAttempt1Done = false
-    Print("Auto cast assist: "..(TigerFuryAlert.castAssist and "ON (tries at 2s & 1s)" or "OFF")..". (Saved)")
+    Print("Auto cast assist: "..(TigerFuryAlert.castAssist and "ON (2s & 1s + post-expiry)" or "OFF")..". (Saved)")
     return
   end
 
@@ -466,9 +498,10 @@ SlashCmdList["TFA"] = function(msg)
       Print("  Sound:     "..label)
     end
     Print("  Combat-only sound: "..(TigerFuryAlert.combatOnly and "ON" or "OFF"))
-    Print("  Auto cast assist:   "..(TigerFuryAlert.castAssist and "ON (2s & 1s)" or "OFF"))
+    Print("  Auto cast assist:   "..(TigerFuryAlert.castAssist and "ON (2s & 1s + post-expiry)" or "OFF"))
     Print("  Cast slot:          "..(TigerFuryAlert.castSlot and tostring(TigerFuryAlert.castSlot) or "None"))
-    Print("  Cast spell name:    "..(TigerFuryAlert.castSpellName or (TigerFuryAlert.buffName or "(nil)")))
+    local nm, rk = TigerFuryAlert.castSpellName or (TigerFuryAlert.buffName or "(nil)"), TigerFuryAlert.spellRankTxt
+    Print("  Cast spell name:    "..nm..(rk and (" ("..rk..")") or ""))
     return
   end
 
