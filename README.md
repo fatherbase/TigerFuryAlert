@@ -1,9 +1,26 @@
 # TigerFuryAlert
 
 **TigerFuryAlert (WoW 1.12 / Lua 5.0)**  
-Vanilla addon that plays a sound when **Tiger’s Fury** is about to expire — at a time you choose (default: **4s**). Extras: combat-only alerts, optional auto-cast assist, a master enable/disable, and slot learning so it can press your macro/button.
+Vanilla addon that plays a sound when **Tiger’s Fury** is about to expire — at a time you choose (default: **4s**). Extras: combat-only alerts, optional auto-cast assist, a master enable/disable, **slot learning**, and a **hardware-safe cast queue** for servers that require a button press.
 
-...
+---
+
+## What it does
+
+- Plays a sound when Tiger’s Fury reaches your configured **X seconds remaining** (default: 4s).
+- **Sound modes**
+  - **Default** – loud **bell toll** (built-in, reliable).
+  - **None** – silent.
+  - **Custom** – any valid game sound path or your own file.
+- Optional **Combat-only** mode (alert only while in combat).
+- Optional **Auto cast assist**:
+  - Tries to cast at **~2s** and **~1s** remaining; also **right after expiry** (0s, +1s, +2s).
+  - If your server blocks automated casts, the addon **queues** the cast to fire on your **next action button press** automatically.
+  - Cast order: **UseAction(slot)** → **CastSpell(spellbook)** → **CastSpellByName** (ranked then plain, self-cast).
+- Master **Enable/Disable** toggle.
+- **Slot learning**: `/tfa slot learn` captures the next action you press (no slot number needed).
+
+---
 
 ### Useful testing
 
@@ -112,6 +129,10 @@ e.g. /tfa sound Sound\Spells\Strike.wav
 Some 1.12/private servers block addon-driven casts outside a hardware click.  
 The addon now tries `UseAction(slot, 0, 1)` (self-cast), then spellbook, then ranked/plain `CastSpellByName(..., 1)`, and also retries after the buff expires. If **/tfa castnow** in combat doesn’t fire, your server is likely blocking automated casts; use the bell alert + press your macro (slot learning helps).
 
+**Tip:** If your server blocks automated casting, keep **/tfa cast** ON. When the bell rings, the addon queues TF so your **next button press** fires it automatically.
+
+---
+
 ## Troubleshooting
 
 - **No sound?**
@@ -121,7 +142,7 @@ The addon now tries `UseAction(slot, 0, 1)` (self-cast), then spellbook, then ra
 - **Wrong buff name (non-English)?**
   - Set it explicitly: `/tfa name <localized name>` then `/tfa status` to confirm.
 - **Auto-cast not firing?**
-  - Try `/tfa slot learn` and press your Tiger’s Fury macro/button; this lets the addon use `UseAction()` like your macro.
+  - Use `/tfa slot learn` and press your **Tiger’s Fury macro/button** so the addon can use `UseAction` on that exact slot.
   - Ensure `/tfa cast` is ON and you’re **in combat** while testing.
 
 ---

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.7
+
+- **New:** Hardware-safe **cast queue** — when auto-cast wants to fire, it also queues TF to trigger on your **next action button press** (expires after ~4s). Solves environments that block casts from OnUpdate.
+- **Change:** Persistent `UseAction` wrapper handles **slot learning** and **queued firing** in one place.
+- **Docs:** README updated with queue behavior and tips.
+
 ## 1.1.6
 
 - **Fix/Improve:** Self-cast targeting for spellbook/name paths (`SpellTargetUnit("player")`, `CastSpellByName(..., 1)`).

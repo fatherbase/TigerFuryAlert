@@ -1,5 +1,5 @@
 -- TigerFuryAlert (WoW 1.12 / Lua 5.0)
--- Version: 1.1.6
+-- Version: 1.1.7
 -- Plays a sound when Tiger's Fury is about to expire.
 -- Sound modes:
 --   "default" = loud bell toll (built-in)
@@ -25,7 +25,7 @@
 --   /tfa test           - play current alert sound
 --   /tfa status         - print settings
 
-local ADDON_VERSION = "1.1.6"
+local ADDON_VERSION = "1.1.7"
 
 TigerFuryAlert = {
   -- state
@@ -50,7 +50,10 @@ TigerFuryAlert = {
 
   -- slot learning
   learningSlot = false,
-  _origUseAction = nil,
+
+  -- queued-cast (hardware-safe)
+  queueActive   = false,
+  queueExpireAt = nil,
 
   -- debug (session only; not saved)
   debug = false,
@@ -62,7 +65,7 @@ local defaults = {
   buffName      = "Tiger's Fury",  -- set with /tfa name on non-English clients
   sound         = "default",       -- "default" | "none" | <path>
   combatOnly    = false,           -- play sound only in combat
-  castAssist    = false,           -- pre-expiry (2s/1s) + post-expiry tries
+  castAssist    = false,           -- pre-expiry (2s/1s) + post-expiry tries (+ queue)
   castSlot      = nil,             -- optional action bar slot (1..120)
   castSpellName = nil,             -- optional explicit spell name (falls back to buffName)
 }
@@ -73,7 +76,7 @@ local DEFAULT_BELL_SOUND = "Sound\\Doodad\\BellTollHorde.wav"
 -- Small cushion so we don't miss exact moments due to frame timing/rounding
 local EPSILON = 0.15
 
--- Hidden tooltip for name fallback on some 1.12 clients (if GetPlayerBuffName is unavailable)
+-- Hidden tooltip for name fallback on some 1.12 clients
 local tip = CreateFrame("GameTooltip", "TigerFuryAlertTooltip", UIParent, "GameTooltipTemplate")
 
 local function Print(msg)
@@ -102,7 +105,7 @@ local function TFA_ShowHelp()
   Print("  /tfa sound none        - Disable sound (silent).")
   Print("  /tfa sound <path>      - Use custom file path.")
   Print("  /tfa combat            - Toggle sound only while in combat (saved).")
-  Print("  /tfa cast              - Toggle auto cast assist (2s & 1s + post-expiry) (saved).")
+  Print("  /tfa cast              - Toggle auto cast assist (2s & 1s + post-expiry + queue) (saved).")
   Print("  /tfa slot <1-120>      - Set action bar slot to cast from (saved).")
   Print("  /tfa slot learn        - Capture the next action you press.")
   Print("  /tfa slot cancel       - Cancel slot learning.")
@@ -119,12 +122,9 @@ function TigerFuryAlert:InitDB()
     if TigerFuryAlertDB[k] == nil then TigerFuryAlertDB[k] = v end
   end
   -- Migrations:
-  if TigerFuryAlertDB.sound == "" then
-    TigerFuryAlertDB.sound = "default"
-  end
-  if TigerFuryAlertDB.sound == "Sound\\Doodad\\BellTollHorde.wav" then
-    TigerFuryAlertDB.sound = "default"
-  end
+  if TigerFuryAlertDB.sound == "" then TigerFuryAlertDB.sound = "default" end
+  if TigerFuryAlertDB.sound == "Sound\\Doodad\\BellTollHorde.wav" then TigerFuryAlertDB.sound = "default" end
+
   -- mirror to runtime (debug intentionally NOT saved)
   self.enabled       = TigerFuryAlertDB.enabled
   self.threshold     = TigerFuryAlertDB.threshold
@@ -137,21 +137,20 @@ function TigerFuryAlert:InitDB()
   self.spellIndex    = nil
   self.spellRankTxt  = nil
   self.debug         = false -- ALWAYS OFF AT STARTUP
+  self.queueActive   = false; self.queueExpireAt = nil
   DPrint("Init complete. Enabled="..tostring(self.enabled))
 end
 
--- Safe sound playback honoring "none"/"default"/<path>
+-- Sound playback
 local function TFA_PlayAlert()
   local mode = TigerFuryAlert.sound or "default"
   if mode == "" then mode = "default" end
 
   if mode == "none" then
     DPrint("Sound: none (silent).")
-    return
   elseif mode == "default" then
     DPrint("Sound: default bell ("..DEFAULT_BELL_SOUND..")")
     PlaySoundFile(DEFAULT_BELL_SOUND)
-    return
   else
     DPrint("Sound: custom ("..mode..")")
     local ok = PlaySoundFile(mode)
@@ -162,13 +161,12 @@ local function TFA_PlayAlert()
   end
 end
 
--- Spellbook search (1.12): find highest-rank index + rank text for the given name
+-- Spellbook search (1.12): highest-rank index + rank text
 function TigerFuryAlert:FindSpellIndexByName(name)
   if not name or name == "" then return nil, nil end
   if GetNumSpellTabs and GetSpellTabInfo and GetSpellName then
     local bestIdx, bestRankNum, bestRankTxt = nil, -1, nil
-    local tabs = GetNumSpellTabs()
-    for t = 1, tabs do
+    for t = 1, GetNumSpellTabs() do
       local _, _, offset, numSpells = GetSpellTabInfo(t)
       if offset and numSpells then
         for s = 1, numSpells do
@@ -225,7 +223,7 @@ end
 function TigerFuryAlert:TryCastTigerFury()
   if not self.enabled then return end
 
-  -- Prefer action slot, if provided (force self-cast arg3=1 to avoid targeting issues)
+  -- Prefer action slot, if provided (self-cast onSelf=1)
   if self.castSlot and UseAction then
     local slot = tonumber(self.castSlot)
     if slot and slot >= 1 and slot <= 120 then
@@ -242,16 +240,12 @@ function TigerFuryAlert:TryCastTigerFury()
     CastSpell(idx, "spell")
     if SpellIsTargeting and SpellIsTargeting() then
       DPrint("Spell was targeting -> SpellTargetUnit('player')")
-      if SpellTargetUnit then
-        SpellTargetUnit("player")
-      else
-        SpellStopTargeting()
-      end
+      if SpellTargetUnit then SpellTargetUnit("player") else SpellStopTargeting() end
     end
     return
   end
 
-  -- Fallback: cast by ranked name (self-cast), then ranked (no flag), then plain (self), then plain
+  -- Fallback: cast by ranked name (self), then plain (self)
   if CastSpellByName then
     local nm = self.castSpellName or self.buffName
     if nm and nm ~= "" then
@@ -259,9 +253,8 @@ function TigerFuryAlert:TryCastTigerFury()
       if ranked then
         if SpellIsTargeting and SpellIsTargeting() then SpellStopTargeting() end
         DPrint("Casting via CastSpellByName('"..ranked.."', 1)")
-        CastSpellByName(ranked, 1) -- on self if supported
+        CastSpellByName(ranked, 1)
         if SpellIsTargeting and SpellIsTargeting() then
-          DPrint("Still targeting -> SpellTargetUnit('player')")
           if SpellTargetUnit then SpellTargetUnit("player") else SpellStopTargeting() end
         end
         return
@@ -270,18 +263,23 @@ function TigerFuryAlert:TryCastTigerFury()
       DPrint("Casting via CastSpellByName('"..nm.."', 1)")
       CastSpellByName(nm, 1)
       if SpellIsTargeting and SpellIsTargeting() then
-        DPrint("Still targeting -> SpellTargetUnit('player')")
         if SpellTargetUnit then SpellTargetUnit("player") else SpellStopTargeting() end
       end
     end
   end
 end
 
--- Compatibility: get buff name even if GetPlayerBuffName() isn't present
+-- Queue helper: schedule cast to fire on next action press (expires after ~4s)
+function TigerFuryAlert:QueueForNextAction()
+  self.queueActive = true
+  local now = GetTime and GetTime() or 0
+  self.queueExpireAt = now + 4
+  DPrint("Queued cast for next action press (expires in 4s).")
+end
+
+-- Compatibility: buff name if GetPlayerBuffName() isn't present
 local function GetBuffNameCompat(buff)
-  if GetPlayerBuffName then
-    return GetPlayerBuffName(buff)
-  end
+  if GetPlayerBuffName then return GetPlayerBuffName(buff) end
   tip:SetOwner(UIParent, "ANCHOR_NONE")
   tip:SetPlayerBuff(buff)
   local r = getglobal("TigerFuryAlertTooltipTextLeft1")
@@ -322,11 +320,23 @@ function TigerFuryAlert:Scan()
       self.justExpiredTime = nil
       self.postNextAttempt = nil
       self.postAttempts    = 0
+
+      -- If we just refreshed successfully, clear any queue
+      if self.queueActive then
+        local now = GetTime and GetTime() or 0
+        if tl and tl > 4 then
+          self.queueActive = false; self.queueExpireAt = nil
+          DPrint("Buff refreshed; clearing queued cast.")
+        elseif self.queueExpireAt and now > self.queueExpireAt then
+          self.queueActive = false; self.queueExpireAt = nil
+        end
+      end
       return
     end
     i = i + 1
   end
 
+  -- Buff not found
   if wasActive then
     local now = GetTime and GetTime() or nil
     self.justExpiredTime = now
@@ -348,6 +358,16 @@ function TigerFuryAlert:OnUpdate(elapsed)
   if self.timer < 0.10 then return end
   self.timer = 0
 
+  -- Expire old queue if needed
+  if self.queueActive and self.queueExpireAt then
+    local now = GetTime and GetTime() or 0
+    if now > self.queueExpireAt then
+      DPrint("Queued cast expired.")
+      self.queueActive = false
+      self.queueExpireAt = nil
+    end
+  end
+
   local tl = nil
   if self.hasBuff and self.buffId then
     tl = GetPlayerBuffTimeLeft(self.buffId)
@@ -360,6 +380,7 @@ function TigerFuryAlert:OnUpdate(elapsed)
   local threshold = self.threshold or 4
 
   if tl then
+    -- Sound at threshold
     if (tl <= (threshold + EPSILON)) and not self.played then
       if (not self.combatOnly) or InCombat() then
         DPrint("Threshold reached at "..string.format("%.2f", tl).."s -> playing alert")
@@ -370,25 +391,29 @@ function TigerFuryAlert:OnUpdate(elapsed)
       self.played = true
     end
 
+    -- Cast assist at 2s/1s; also queue for next action press
     if self.castAssist and InCombat() then
       if (tl <= (2 + EPSILON)) and not self.castAttempt2Done then
         DPrint("Cast assist @~2s")
         self:TryCastTigerFury()
+        self:QueueForNextAction()
         self.castAttempt2Done = true
       end
       if (tl <= (1 + EPSILON)) and not self.castAttempt1Done then
         DPrint("Cast assist @~1s")
         self:TryCastTigerFury()
+        self:QueueForNextAction()
         self.castAttempt1Done = true
       end
     end
   else
+    -- Post-expiry window (+queue) while in combat
     if self.castAssist and InCombat() and self.justExpiredTime then
       local now = GetTime and GetTime() or 0
-      -- Try at 0s, +1s, +2s after expiry
       if self.postAttempts < 3 and self.postNextAttempt and now + 0.01 >= self.postNextAttempt then
         DPrint("Post-expiry cast attempt #"..(self.postAttempts + 1))
         self:TryCastTigerFury()
+        self:QueueForNextAction()
         self.postAttempts = self.postAttempts + 1
         self.postNextAttempt = now + 1
       end
@@ -402,35 +427,40 @@ function TigerFuryAlert:OnUpdate(elapsed)
   end
 end
 
--- Slot learning ---------------------------------------------------------------
+-- Persistent UseAction hook (handles slot learning + queued-cast)
+local TFA_OrigUseAction = nil
+local function TFA_HookUseAction()
+  if not TFA_OrigUseAction and UseAction then
+    TFA_OrigUseAction = UseAction
+    UseAction = function(slot)
+      local a1, a2 = arg and arg[1], arg and arg[2] -- Lua 5.0 varargs
 
+      -- Slot learning: capture first pressed slot
+      if TigerFuryAlert and TigerFuryAlert.learningSlot then
+        TigerFuryAlert.learningSlot = false
+        TigerFuryAlertDB.castSlot = slot
+        TigerFuryAlert.castSlot   = slot
+        Print("Captured action slot "..slot..". Saved. (Auto-cast will use this first)")
+      end
+
+      -- Queued cast: fire before user's action
+      if TigerFuryAlert and TigerFuryAlert.queueActive then
+        TigerFuryAlert.queueActive = false
+        TigerFuryAlert.queueExpireAt = nil
+        DPrint("Queued cast triggered via UseAction()")
+        TigerFuryAlert:TryCastTigerFury()
+      end
+
+      return TFA_OrigUseAction(slot, a1, a2)
+    end
+  end
+end
+
+-- Slot learning controls
 function TigerFuryAlert:BeginLearnSlot()
   if self.learningSlot then return end
   self.learningSlot = true
-  self._origUseAction = UseAction
   Print("Slot learning: press your Tiger's Fury button now... (/tfa slot cancel to abort)")
-
-  -- Wrap UseAction to capture the next slot pressed (Lua 5.0 varargs via 'arg')
-  UseAction = function(slot)
-    local a1, a2 = arg and arg[1], arg and arg[2]
-    if TigerFuryAlert.learningSlot then
-      TigerFuryAlert.learningSlot = false
-      TigerFuryAlertDB.castSlot = slot
-      TigerFuryAlert.castSlot   = slot
-      Print("Captured action slot "..slot..". Saved. (Auto-cast will use this first)")
-      if TigerFuryAlert._origUseAction then
-        local f = TigerFuryAlert._origUseAction
-        TigerFuryAlert._origUseAction = nil
-        UseAction = f
-        -- forward the original click with args preserved
-        f(slot, a1, a2)
-      end
-      return
-    end
-    if TigerFuryAlert._origUseAction then
-      return TigerFuryAlert._origUseAction(slot, a1, a2)
-    end
-  end
 end
 
 function TigerFuryAlert:CancelLearnSlot()
@@ -439,10 +469,6 @@ function TigerFuryAlert:CancelLearnSlot()
     return
   end
   self.learningSlot = false
-  if self._origUseAction then
-    UseAction = self._origUseAction
-    self._origUseAction = nil
-  end
   Print("Slot learning cancelled.")
 end
 
@@ -528,7 +554,7 @@ SlashCmdList["TFA"] = function(msg)
     TigerFuryAlert.castAssist   = TigerFuryAlertDB.castAssist
     TigerFuryAlert.castAttempt2Done = false
     TigerFuryAlert.castAttempt1Done = false
-    Print("Auto cast assist: "..(TigerFuryAlert.castAssist and "ON (2s & 1s + post-expiry)" or "OFF")..". (Saved)")
+    Print("Auto cast assist: "..(TigerFuryAlert.castAssist and "ON (2s & 1s + post-expiry + queue)" or "OFF")..". (Saved)")
     return
   end
 
@@ -605,11 +631,12 @@ SlashCmdList["TFA"] = function(msg)
       Print("  Sound:     "..label)
     end
     Print("  Combat-only sound: "..(TigerFuryAlert.combatOnly and "ON" or "OFF"))
-    Print("  Auto cast assist:   "..(TigerFuryAlert.castAssist and "ON (2s & 1s + post-expiry)" or "OFF"))
+    Print("  Auto cast assist:   "..(TigerFuryAlert.castAssist and "ON (2s & 1s + post-expiry + queue)" or "OFF"))
     Print("  Cast slot:          "..(TigerFuryAlert.castSlot and tostring(TigerFuryAlert.castSlot) or "None"))
     local nm, rk = TigerFuryAlert.castSpellName or (TigerFuryAlert.buffName or "(nil)"), TigerFuryAlert.spellRankTxt
     Print("  Cast spell name:    "..nm..(rk and (" ("..rk..")") or ""))
     Print("  Debug (session):    "..(TigerFuryAlert.debug and "ON" or "OFF"))
+    Print("  Queue (session):    "..(TigerFuryAlert.queueActive and "ACTIVE" or "idle"))
     return
   end
 
@@ -626,13 +653,13 @@ f:RegisterEvent("PLAYER_AURAS_CHANGED")
 f:SetScript("OnEvent", function()
   if event == "VARIABLES_LOADED" then
     TigerFuryAlert:InitDB()
+    TFA_HookUseAction() -- set up persistent UseAction wrapper (learn + queue)
   elseif event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_AURAS_CHANGED" then
     TigerFuryAlert:Scan()
   end
 end)
 
 f:Show()
-
 f:SetScript("OnUpdate", function()
   TigerFuryAlert:OnUpdate(arg1)
 end)
