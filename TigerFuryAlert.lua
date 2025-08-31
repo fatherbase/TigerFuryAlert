@@ -1,12 +1,12 @@
 -- TigerFuryAlert (WoW 1.12 / Lua 5.0)
--- Version: 1.0.1
+-- Version: 1.0.2
 -- Plays a sound when Tiger's Fury is about to expire.
 -- Features:
 --  - Account-wide saved settings (delay, buff name, sound path)
 --  - Optional custom sound (falls back to UI sound if missing/invalid)
 --  - Slash commands: /tfa help | delay | name | sound | test | status
 
-local ADDON_VERSION = "1.0.1"
+local ADDON_VERSION = "1.0.2"
 
 TigerFuryAlert = {
   hasBuff = false,
@@ -94,6 +94,10 @@ function TigerFuryAlert:Scan()
 end
 
 function TigerFuryAlert:OnUpdate(elapsed)
+  -- Lua 5.0/Vanilla fallback: 'elapsed' may be in global arg1
+  if not elapsed then elapsed = arg1 end
+  if not elapsed or elapsed <= 0 then return end
+
   if not self.hasBuff or not self.buffId then return end
 
   self.timer = (self.timer or 0) + elapsed
@@ -203,6 +207,7 @@ f:RegisterEvent("VARIABLES_LOADED")
 f:RegisterEvent("PLAYER_ENTERING_WORLD")
 f:RegisterEvent("PLAYER_AURAS_CHANGED")
 
+-- 1.12-friendly: event name is in global 'event'
 f:SetScript("OnEvent", function()
   if event == "VARIABLES_LOADED" then
     TigerFuryAlert:InitDB()
@@ -211,6 +216,7 @@ f:SetScript("OnEvent", function()
   end
 end)
 
-f:SetScript("OnUpdate", function(self, elapsed)
-  TigerFuryAlert:OnUpdate(elapsed)
+-- 1.12-friendly: 'elapsed' may not be passed; use global arg1
+f:SetScript("OnUpdate", function()
+  TigerFuryAlert:OnUpdate(arg1)
 end)
