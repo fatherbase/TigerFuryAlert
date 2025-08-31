@@ -1,12 +1,15 @@
 -- TigerFuryAlert (WoW 1.12 / Lua 5.0)
--- Version: 1.0.2
+-- Version: 1.0.4
 -- Plays a sound when Tiger's Fury is about to expire.
 -- Features:
---  - Account-wide saved settings (delay, buff name, sound path)
---  - Optional custom sound (falls back to UI sound if missing/invalid)
---  - Slash commands: /tfa help | delay | name | sound | test | status
+--  - Account-wide saved settings (delay, buff name, sound mode/path)
+--  - Sound modes:
+--      * "default" = built-in UI sound (enabled by default)
+--      * "none"    = silent (no sound)
+--      * <path>    = custom file (falls back to built-in if it fails)
+--  - Slash: /tfa help | delay | name | sound | test | status
 
-local ADDON_VERSION = "1.0.2"
+local ADDON_VERSION = "1.0.4"
 
 TigerFuryAlert = {
   hasBuff = false,
@@ -17,10 +20,13 @@ TigerFuryAlert = {
 }
 
 local defaults = {
-  threshold = 4,                                     -- seconds before expiry
-  buffName  = "Tiger's Fury",                        -- set with /tfa name on non-English clients
-  sound     = "Interface\\AddOns\\TigerFuryAlert\\alert.wav", -- optional; can be cleared
+  threshold = 4,              -- seconds before expiry
+  buffName  = "Tiger's Fury", -- set with /tfa name on non-English clients
+  sound     = "default",      -- "default" | "none" | <path>; default = built-in sound
 }
+
+-- Built-in UI sound path for reliable playback on 1.12
+local DEFAULT_UI_SOUND = "Sound\\Interface\\MapPing.wav"
 
 -- Hidden tooltip for name fallback on some 1.12 clients (if GetPlayerBuffName is unavailable)
 local tip = CreateFrame("GameTooltip", "TigerFuryAlertTooltip", UIParent, "GameTooltipTemplate")
@@ -34,21 +40,32 @@ function TigerFuryAlert:InitDB()
   for k, v in pairs(defaults) do
     if TigerFuryAlertDB[k] == nil then TigerFuryAlertDB[k] = v end
   end
+  -- Migrate old empty-string sound to "default"
+  if TigerFuryAlertDB.sound == "" then
+    TigerFuryAlertDB.sound = "default"
+  end
   -- mirror to runtime fields
   self.threshold = TigerFuryAlertDB.threshold
   self.buffName  = TigerFuryAlertDB.buffName
   self.sound     = TigerFuryAlertDB.sound
 end
 
--- Safe sound playback with fallback to a UI sound if the file can't be played or is empty
+-- Safe sound playback honoring "none"/"default"/<path>
 local function TFA_PlayAlert()
-  local ok = false
-  if TigerFuryAlert.sound and TigerFuryAlert.sound ~= "" then
-    local r = PlaySoundFile(TigerFuryAlert.sound) -- non-nil on success (1.12)
-    if r then ok = true end
-  end
-  if not ok then
-    PlaySound("MapPing") -- fallback UI sound
+  local mode = TigerFuryAlert.sound or "default"
+  if mode == "" then mode = "default" end
+
+  if mode == "none" then
+    return -- silent mode
+  elseif mode == "default" then
+    PlaySoundFile(DEFAULT_UI_SOUND)
+    return
+  else
+    -- custom path; if it fails, fall back to built-in
+    local ok = PlaySoundFile(mode)
+    if not ok then
+      PlaySoundFile(DEFAULT_UI_SOUND)
+    end
   end
 end
 
@@ -129,13 +146,15 @@ SlashCmdList["TFA"] = function(msg)
     Print("TigerFuryAlert v"..ADDON_VERSION.." — Commands:")
     Print("  /tfa delay <seconds>  - Alert when that many seconds remain (e.g., 2 or 4.5).")
     Print("  /tfa name <Buff Name> - Set the buff name (for non-English clients).")
-    Print("  /tfa sound <path>     - Set custom sound path, or '/tfa sound none' to disable.")
-    Print("  /tfa test             - Play the current alert sound (with fallback).")
+    Print("  /tfa sound default    - Use built-in sound (default).")
+    Print("  /tfa sound none       - Disable sound (silent).")
+    Print("  /tfa sound <path>     - Use custom file (e.g., Interface\\AddOns\\...\\alert.wav).")
+    Print("  /tfa test             - Play the alert sound using current mode.")
     Print("  /tfa status           - Show current settings.")
     return
   end
 
-  -- /tfa delay 2  (Lua 5.0: use string.find capture instead of string.match)
+  -- /tfa delay 2
   local _, _, d = string.find(lower, "^delay%s+([%d%.]+)")
   if d then
     local n = tonumber(d)
@@ -167,16 +186,23 @@ SlashCmdList["TFA"] = function(msg)
     return
   end
 
-  -- /tfa sound <path>  or  /tfa sound none
+  -- /tfa sound ...
   if string.find(lower, "^sound%s+") then
-    local path = string.sub(msg, 7)
-    if path and string.lower(path) == "none" then path = "" end
-    TigerFuryAlertDB.sound = path or ""
-    TigerFuryAlert.sound   = path or ""
-    if TigerFuryAlert.sound == "" then
-      Print("Custom sound disabled. Using default UI sound. (Saved account-wide)")
+    local raw = string.sub(msg, 7) or ""
+    local modeLower = string.lower(raw)
+
+    if modeLower == "none" then
+      TigerFuryAlertDB.sound = "none"
+      TigerFuryAlert.sound   = "none"
+      Print("Sound disabled (silent). (Saved account-wide)")
+    elseif modeLower == "default" or raw == "" then
+      TigerFuryAlertDB.sound = "default"
+      TigerFuryAlert.sound   = "default"
+      Print("Using built-in UI sound. (Saved account-wide)")
     else
-      Print("Sound path set. Use /tfa test to preview. (Saved account-wide)")
+      TigerFuryAlertDB.sound = raw
+      TigerFuryAlert.sound   = raw
+      Print("Custom sound set. Use /tfa test to preview. (Saved account-wide)")
     end
     return
   end
@@ -189,10 +215,19 @@ SlashCmdList["TFA"] = function(msg)
 
   -- /tfa status
   if lower == "status" then
+    local mode = TigerFuryAlert.sound or "default"
+    local soundDesc
+    if mode == "none" then
+      soundDesc = "None (silent)"
+    elseif mode == "default" or mode == "" then
+      soundDesc = "Default ("..DEFAULT_UI_SOUND..")"
+    else
+      soundDesc = "Custom: "..mode
+    end
     Print("TigerFuryAlert v"..ADDON_VERSION.." — Current settings:")
     Print("  Delay: "..(TigerFuryAlert.threshold or 4).."s")
     Print("  Buff:  "..(TigerFuryAlert.buffName or "(nil)"))
-    Print("  Sound: "..((TigerFuryAlert.sound and TigerFuryAlert.sound ~= "") and TigerFuryAlert.sound or "(default UI sound)"))
+    Print("  Sound: "..soundDesc)
     return
   end
 
@@ -215,6 +250,9 @@ f:SetScript("OnEvent", function()
     TigerFuryAlert:Scan()
   end
 end)
+
+-- Ensure OnUpdate fires
+f:Show()
 
 -- 1.12-friendly: 'elapsed' may not be passed; use global arg1
 f:SetScript("OnUpdate", function()
