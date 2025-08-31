@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0
+
+- **Change:** Removed all casting-related features (auto-cast, slot learn, castnow, spell overrides, queued casting).
+- **Change:** Removed debug mode.
+- **Simplify:** Lean core — alert sound + enable/disable + delay + combat-only + sound modes.
+- **Docs:** README rewritten to reflect simplification.
+
 ## 1.1.7
 
 - **New:** Hardware-safe **cast queue** — when auto-cast wants to fire, it also queues TF to trigger on your **next action button press** (expires after ~4s). Solves environments that block casts from OnUpdate.
