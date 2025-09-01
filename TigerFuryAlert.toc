@@ -1,6 +1,6 @@
 ## Interface: 11200
 ## Title: |cffffcc00T|riger|cffffcc00F|rury|cffffcc00A|rlert
-## Notes: Plays a sound N seconds before Tiger's Fury expires. Configurable with /tfa.
-## Version: 1.2.0
+## Notes: Plays a sound and optional on-screen alert N seconds before Tiger's Fury expires. Configurable with /tfa.
+## Version: 1.3.0
 ## SavedVariables: TigerFuryAlertDB
 TigerFuryAlert.lua

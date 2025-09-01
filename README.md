@@ -1,21 +1,20 @@
 # TigerFuryAlert
 
 **TigerFuryAlert (WoW 1.12 / Lua 5.0)**  
-Vanilla addon that plays a sound when **Tiger’s Fury** is about to expire — at a time you choose (default: **4s**).
+Vanilla addon that plays a sound **and an optional on-screen alert** when **Tiger’s Fury** is about to expire — at a time you choose (default: **4s**). The alert style is similar to Critline’s center-screen splash.
 
 ---
 
 ## What it does
 
 - Plays a sound when Tiger’s Fury reaches your configured **X seconds remaining** (default: 4s).
+- **On-screen alert** (Critline-style): big yellow text appears center-screen and fades out.
 - **Sound modes**
   - **Default** – loud **bell toll** (built-in, reliable).
   - **None** – silent.
   - **Custom** – any valid game sound path or your own file.
 - Optional **Combat-only** mode (alert only while in combat).
 - Master **Enable/Disable** toggle.
-
-> Note: Casting features were removed for simplicity and compatibility.
 
 ---
 
@@ -32,13 +31,15 @@ Vanilla addon that plays a sound when **Tiger’s Fury** is about to expire — 
 
 ## Saved settings (account-wide)
 
-Stored in `TigerFuryAlertDB`:
+`TigerFuryAlertDB`:
 
 - `enabled` – master switch (**ON** by default)
 - `threshold` – delay (seconds before the buff ends; default **4**)
 - `buffName` – localized name of Tiger’s Fury
 - `sound` – `"default"` (bell toll), `"none"`, or a custom file path
-- `combatOnly` – play sound only while in combat
+- `combatOnly` – play only while in combat
+- `showAlert` – on-screen alert ON/OFF
+- `alertPos` – on-screen alert position (x/y offset from center)
 
 ---
 
@@ -48,7 +49,7 @@ Type **`/tfa`** (no args) to print this help in chat.
 
 /tfa Show help.
 /tfa status Show current settings.
-/tfa test Play the alert sound.
+/tfa test Play the alert sound and show a test alert.
 
 /tfa enable Toggle addon ON/OFF (saved).
 
@@ -66,6 +67,10 @@ e.g. /tfa sound Sound\Spells\Strike.wav
 /tfa sound Interface\AddOns\TigerFuryAlert\alert.wav
 
 /tfa combat Toggle: only alert while in combat (saved).
+/tfa alert Toggle: on-screen alert ON/OFF (saved).
+
+/tfa unlock Show & move the alert. Drag it; then /tfa lock.
+/tfa lock Lock/hide the alert anchor.
 
 ### Examples
 
@@ -81,6 +86,8 @@ e.g. /tfa sound Sound\Spells\Strike.wav
 - Recasting Tiger’s Fury **re-arms** the alert for the next cycle.
 - The addon uses a tiny timing cushion so it doesn’t miss the exact moment; if you want it earlier, try `3.9` instead of `4`.
 - If your client lacks `GetPlayerBuffName()`, the addon uses a hidden tooltip to read the buff name.
+
+**Tip:** Use `/tfa unlock` to drag the alert to your preferred spot; it saves the position automatically.
 
 ---
 

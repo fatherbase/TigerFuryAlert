@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0
+
+- **New:** Critline-style **on-screen alert** (center-screen splash with fade).
+- **New:** `/tfa alert` toggle (saved).
+- **New:** `/tfa unlock` and `/tfa lock` to place the alert; position saves (`alertPos`).
+- **Change:** `/tfa test` now plays the sound **and** shows a test alert.
+- **Note:** Casting & debug features remain removed (see 1.2.0).
+
 ## 1.2.0
 
 - **Change:** Removed all casting-related features (auto-cast, slot learn, castnow, spell overrides, queued casting).
