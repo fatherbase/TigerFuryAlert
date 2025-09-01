@@ -9,6 +9,10 @@ Vanilla addon that plays a sound **and an optional on-screen alert** when **Tige
 
 - Plays a sound when Tiger’s Fury reaches your configured **X seconds remaining** (default: 4s).
 - **On-screen alert** (Critline-style): big yellow text appears center-screen and fades out.
+- **live countdown** When the alert triggers, the splash can show a **live countdown**:
+
+  > Tiger’s Fury expiring in **3.8s**, **3.7s**, **3.6s**…
+
 - **Sound modes**
   - **Default** – loud **bell toll** (built-in, reliable).
   - **None** – silent.
@@ -68,6 +72,7 @@ e.g. /tfa sound Sound\Spells\Strike.wav
 
 /tfa combat Toggle: only alert while in combat (saved).
 /tfa alert Toggle: on-screen alert ON/OFF (saved).
+/tfa countdown Toggle: live countdown in the alert message
 
 /tfa unlock Show & move the alert. Drag it; then /tfa lock.
 /tfa lock Lock/hide the alert anchor.

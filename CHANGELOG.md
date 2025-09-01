@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.1
+
+- **New:** Live countdown text on the splash (“expiring in X.Xs”), updating ~10Hz until expiry.
+- **New:** `/tfa countdown` toggle (saved).
+- **Improve:** `/tfa test` now respects countdown setting (shows X.Xs if enabled, or static seconds if not).
+
 ## 1.3.0
 
 - **New:** Critline-style **on-screen alert** (center-screen splash with fade).

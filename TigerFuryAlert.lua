@@ -1,14 +1,15 @@
 -- TigerFuryAlert (WoW 1.12 / Lua 5.0)
--- Version: 1.3.0
+-- Version: 1.3.1
 -- Plays a sound (and optional on-screen alert) when Tiger's Fury is about to expire.
 -- Sound modes:
 --   "default" = loud bell toll (built-in)
 --   "none"    = silent
 --   <path>    = custom file (falls back to default bell if it fails)
 -- Toggles (saved):
---   /tfa enable  - master ON/OFF
---   /tfa combat  - sound/visual only in combat
---   /tfa alert   - on-screen alert ON/OFF (Critline-style)
+--   /tfa enable     - master ON/OFF
+--   /tfa combat     - sound/visual only in combat
+--   /tfa alert      - on-screen alert ON/OFF (Critline-style)
+--   /tfa countdown  - live countdown text ON/OFF
 -- Other:
 --   /tfa, /tfa help     - show help
 --   /tfa delay <sec>    - set alert threshold
@@ -19,7 +20,7 @@
 --   /tfa unlock         - show/move the alert anchor; drag it; then /tfa lock
 --   /tfa lock           - lock/hide the alert anchor
 
-local ADDON_VERSION = "1.3.0"
+local ADDON_VERSION = "1.3.1"
 
 TigerFuryAlert = {
   hasBuff = false,
@@ -31,18 +32,20 @@ TigerFuryAlert = {
   -- visual alert runtime
   alertActive = false,
   alertTimer  = 0,
-  alertHold   = 1.2,  -- seconds at full alpha
-  alertFade   = 1.0,  -- seconds to fade out
+  alertHold   = 1.2,  -- seconds at full alpha (used when countdown is OFF)
+  alertFade   = 1.0,  -- seconds to fade out  (used when countdown is OFF)
+  alertModeCountdown = false, -- true while live countdown is running
 }
 
 local defaults = {
-  enabled    = true,            -- master switch
-  threshold  = 4,               -- seconds before expiry
-  buffName   = "Tiger's Fury",  -- set with /tfa name on non-English clients
-  sound      = "default",       -- "default" | "none" | <path>
-  combatOnly = false,           -- if true, only alert in combat
-  showAlert  = true,            -- visual alert ON by default
-  alertPos   = { x = 0, y = 120 }, -- offset from UIParent center
+  enabled       = true,            -- master switch
+  threshold     = 4,               -- seconds before expiry
+  buffName      = "Tiger's Fury",  -- set with /tfa name on non-English clients
+  sound         = "default",       -- "default" | "none" | <path>
+  combatOnly    = false,           -- if true, only alert in combat
+  showAlert     = true,            -- visual alert ON by default
+  alertCountdown= true,            -- live countdown ON by default
+  alertPos      = { x = 0, y = 120 }, -- offset from UIParent center
 }
 
 -- Default sound: loud & reliable in 1.12
@@ -122,6 +125,7 @@ local function TFA_ShowHelp()
   Print("  /tfa sound <path>      - Use custom file path.")
   Print("  /tfa combat            - Toggle: only alert in combat (saved).")
   Print("  /tfa alert             - Toggle: on-screen alert (saved).")
+  Print("  /tfa countdown         - Toggle: live countdown text (saved).")
   Print("  /tfa unlock            - Show/move alert position; then /tfa lock.")
   Print("  /tfa lock              - Lock/hide the alert anchor.")
   Print("  /tfa test              - Play sound and show a test alert.")
@@ -132,7 +136,6 @@ function TigerFuryAlert:InitDB()
   if not TigerFuryAlertDB then TigerFuryAlertDB = {} end
   for k, v in pairs(defaults) do
     if TigerFuryAlertDB[k] == nil then
-      -- Deep copy simple table for alertPos default
       if k == "alertPos" and type(v) == "table" then
         TigerFuryAlertDB[k] = { x = v.x, y = v.y }
       else
@@ -147,17 +150,18 @@ function TigerFuryAlert:InitDB()
   end
 
   -- mirror to runtime
-  self.enabled    = TigerFuryAlertDB.enabled
-  self.threshold  = TigerFuryAlertDB.threshold
-  self.buffName   = TigerFuryAlertDB.buffName
-  self.sound      = TigerFuryAlertDB.sound
-  self.combatOnly = TigerFuryAlertDB.combatOnly
-  self.showAlert  = TigerFuryAlertDB.showAlert
+  self.enabled        = TigerFuryAlertDB.enabled
+  self.threshold      = TigerFuryAlertDB.threshold
+  self.buffName       = TigerFuryAlertDB.buffName
+  self.sound          = TigerFuryAlertDB.sound
+  self.combatOnly     = TigerFuryAlertDB.combatOnly
+  self.showAlert      = TigerFuryAlertDB.showAlert
+  self.alertCountdown = TigerFuryAlertDB.alertCountdown
 
   self:ApplyAlertPosition()
 end
 
--- Play alert honoring "none"/"default"/<path> with fallback
+-- Sound playback honoring "none"/"default"/<path> with fallback
 local function TFA_PlayAlertSound()
   local mode = TigerFuryAlert.sound or "default"
   if mode == "" then mode = "default" end
@@ -173,19 +177,56 @@ local function TFA_PlayAlertSound()
   end
 end
 
--- Show visual alert text (Critline-style splash)
-function TigerFuryAlert:ShowVisualAlert(msg)
+-- Visual helpers -------------------------------------------------------------
+
+local function TFA_FormatSecondsOneDecimal(s)
+  if not s then return "0.0" end
+  if s < 0 then s = 0 end
+  -- Lua 5.0 supports string.format with %.1f
+  return string.format("%.1f", s)
+end
+
+function TigerFuryAlert:ShowVisualStatic(msg)
   if not self.showAlert then return end
   if self.combatOnly and not InCombat() then return end
-  msg = msg or "Tiger's Fury expiring!"
-  alertText:SetText(msg)
+  alertText:SetText(msg or "Tiger's Fury expiring!")
   alertFrame:SetAlpha(1)
   alertFrame:Show()
   self.alertActive = true
-  self.alertTimer  = 0
+  self.alertModeCountdown = false
+  self.alertTimer = 0
 end
 
--- Get buff name in 1.12 even if GetPlayerBuffName() is missing
+function TigerFuryAlert:StartCountdown(tl)
+  if not self.showAlert then return end
+  if self.combatOnly and not InCombat() then return end
+  local txt = "Tiger's Fury expiring in "..TFA_FormatSecondsOneDecimal(tl).."s"
+  alertText:SetText(txt)
+  alertFrame:SetAlpha(1)
+  alertFrame:Show()
+  self.alertActive = true
+  self.alertModeCountdown = true
+  -- While counting down, we keep it visible; no fade timer needed
+end
+
+function TigerFuryAlert:UpdateCountdown(tl)
+  if not self.alertModeCountdown then return end
+  local txt = "Tiger's Fury expiring in "..TFA_FormatSecondsOneDecimal(tl).."s"
+  alertText:SetText(txt)
+  if self.combatOnly and not InCombat() then
+    -- Hide if combat-only and player left combat
+    self:HideAlert()
+  end
+end
+
+function TigerFuryAlert:HideAlert()
+  alertFrame:Hide()
+  self.alertActive = false
+  self.alertModeCountdown = false
+  self.alertTimer = 0
+end
+
+-- Buff name compat for 1.12
 local function GetBuffNameCompat(buff)
   if GetPlayerBuffName then
     return GetPlayerBuffName(buff)
@@ -200,6 +241,10 @@ end
 
 function TigerFuryAlert:ResetCycleFlags()
   self.played = false
+  -- If we were counting down but buff moved out of threshold, hide
+  if self.alertModeCountdown then
+    self:HideAlert()
+  end
 end
 
 function TigerFuryAlert:Scan()
@@ -236,8 +281,8 @@ function TigerFuryAlert:OnUpdate(elapsed)
   if not elapsed then elapsed = arg1 end
   if not elapsed or elapsed <= 0 then return end
 
-  -- Drive alert fade if active
-  if self.alertActive then
+  -- Manage fade when in static (non-countdown) mode
+  if self.alertActive and not self.alertModeCountdown then
     self.alertTimer = self.alertTimer + elapsed
     local a
     if self.alertTimer <= self.alertHold then
@@ -246,8 +291,7 @@ function TigerFuryAlert:OnUpdate(elapsed)
       local t = (self.alertTimer - self.alertHold) / self.alertFade
       a = 1 - t
     else
-      alertFrame:Hide()
-      self.alertActive = false
+      self:HideAlert()
       a = 0
     end
     if a and alertFrame:IsShown() then
@@ -265,18 +309,46 @@ function TigerFuryAlert:OnUpdate(elapsed)
 
   local tl = GetPlayerBuffTimeLeft(self.buffId)
   if not tl then
+    -- buff info invalid; rescan
     self:Scan()
     return
   end
 
   local threshold = self.threshold or 4
 
-  if (tl <= (threshold + EPSILON)) and not self.played then
-    if (not self.combatOnly) or InCombat() then
-      TFA_PlayAlertSound()
-      self:ShowVisualAlert("Tiger's Fury expiring!")
+  -- If counting down and buff moved back out of the threshold, hide
+  if self.alertModeCountdown and tl > (threshold + EPSILON) then
+    self:HideAlert()
+  end
+
+  -- Trigger logic
+  if (tl <= (threshold + EPSILON)) then
+    -- Sound just once at threshold crossing
+    if not self.played then
+      if (not self.combatOnly) or InCombat() then
+        TFA_PlayAlertSound()
+        if self.alertCountdown then
+          self:StartCountdown(tl)
+        else
+          -- Static one-shot message with integer seconds
+          local secs = math.floor(threshold + 0.5)
+          self:ShowVisualStatic("Tiger's Fury expiring in "..secs.." seconds")
+        end
+      end
+      self.played = true
     end
-    self.played = true
+
+    -- Keep countdown text updating while buff remains
+    if self.alertCountdown and self.alertActive and self.alertModeCountdown then
+      if (not self.combatOnly) or InCombat() then
+        self:UpdateCountdown(tl)
+      end
+    end
+
+    -- If buff actually ended, hide countdown
+    if tl <= 0.05 and self.alertModeCountdown then
+      self:HideAlert()
+    end
   end
 end
 
@@ -370,11 +442,24 @@ SlashCmdList["TFA"] = function(msg)
     return
   end
 
+  -- /tfa countdown
+  if lower == "countdown" then
+    TigerFuryAlertDB.alertCountdown = not TigerFuryAlertDB.alertCountdown
+    TigerFuryAlert.alertCountdown   = TigerFuryAlertDB.alertCountdown
+    Print("Live countdown text: "..(TigerFuryAlert.alertCountdown and "ON" or "OFF")..". (Saved)")
+    -- If we turn it off mid-countdown, just hide current alert
+    if not TigerFuryAlert.alertCountdown and TigerFuryAlert.alertModeCountdown then
+      TigerFuryAlert:HideAlert()
+    end
+    return
+  end
+
   -- /tfa unlock
   if lower == "unlock" then
     TigerFuryAlert:ApplyAlertPosition()
     anchor:Show()
-    TigerFuryAlert:ShowVisualAlert("Tiger's Fury expiring!") -- preview while moving
+    -- Preview without live countdown
+    TigerFuryAlert:ShowVisualStatic("Tiger's Fury expiring!")
     Print("Anchor shown. Drag it, then /tfa lock to save.")
     return
   end
@@ -389,7 +474,12 @@ SlashCmdList["TFA"] = function(msg)
   -- /tfa test
   if lower == "test" then
     TFA_PlayAlertSound()
-    TigerFuryAlert:ShowVisualAlert("Tiger's Fury expiring!")
+    if TigerFuryAlert.alertCountdown then
+      TigerFuryAlert:StartCountdown(TigerFuryAlert.threshold or 4)
+    else
+      local secs = math.floor((TigerFuryAlert.threshold or 4) + 0.5)
+      TigerFuryAlert:ShowVisualStatic("Tiger's Fury expiring in "..secs.." seconds")
+    end
     return
   end
 
@@ -406,16 +496,17 @@ SlashCmdList["TFA"] = function(msg)
     end
     local pos = TigerFuryAlertDB.alertPos or {x=0,y=0}
     Print("TigerFuryAlert v"..ADDON_VERSION.." — Current settings:")
-    Print("  Enabled:        "..(TigerFuryAlert.enabled and "ON" or "OFF"))
-    Print("  Delay:          "..(TigerFuryAlert.threshold or 4).."s")
-    Print("  Buff:           "..(TigerFuryAlert.buffName or "(nil)"))
+    Print("  Enabled:         "..(TigerFuryAlert.enabled and "ON" or "OFF"))
+    Print("  Delay:           "..(TigerFuryAlert.threshold or 4).."s")
+    Print("  Buff:            "..(TigerFuryAlert.buffName or "(nil)"))
     if detail then
-      Print("  Sound:          "..label.." — "..detail)
+      Print("  Sound:           "..label.." — "..detail)
     else
-      Print("  Sound:          "..label)
+      Print("  Sound:           "..label)
     end
-    Print("  Combat-only:    "..(TigerFuryAlert.combatOnly and "ON" or "OFF"))
-    Print("  On-screen alert:"..(TigerFuryAlert.showAlert and "ON" or "OFF"))
+    Print("  Combat-only:     "..(TigerFuryAlert.combatOnly and "ON" or "OFF"))
+    Print("  On-screen alert: "..(TigerFuryAlert.showAlert and "ON" or "OFF"))
+    Print("  Countdown text:  "..(TigerFuryAlert.alertCountdown and "ON" or "OFF"))
     Print(string.format("  Alert position:  x=%d, y=%d (from center)", pos.x or 0, pos.y or 0))
     return
   end
